@@ -4,37 +4,44 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 /**
- * 질문에서 노션 검색용 키워드를 추출.
+ * 질문이 사내 가이드 관련인지 분류하고, 관련이면 노션 검색용 키워드를 추출.
  * 노션 Search API는 문장 검색에 약해서, 짧은 키워드 2~3개로 나눠 검색한다.
- * @returns {Promise<string[]>}
+ * @returns {Promise<{relevant: boolean, keywords: string[]}>}
  */
-export async function extractSearchKeywords(question) {
+export async function analyzeQuestion(question) {
   const res = await openai.chat.completions.create({
     model: MODEL,
     temperature: 0,
-    max_tokens: 100,
+    max_tokens: 120,
+    response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
         content:
-          "사용자의 질문에서 사내 노션 문서를 검색하기 위한 핵심 키워드를 추출해라. " +
-          '1~3개의 짧은 명사형 키워드를 JSON 배열로만 답해라. 예: ["연차", "휴가 신청"]',
+          "너는 사내 가이드봇의 질문 분류기다. 사용자의 질문이 회사 생활·사내 제도" +
+          "(인사규정, 휴가, 복지, 급여일, 근무환경, 회의실/장비 예약, 조직, 사내 행사, 그룹웨어 사용법 등)와 " +
+          "관련이 있는지 판단하고, 관련 있으면 노션 검색용 키워드를 추출해라.\n" +
+          'JSON으로만 답해라: {"relevant": true 또는 false, "keywords": ["키워드1", "키워드2"]}\n' +
+          "- 회사와 무관한 질문(요리 레시피, 일반 상식, 번역, 숙제, 코딩, 잡담 등)이면 relevant=false, keywords=[]\n" +
+          "- 회사 관련인지 애매하면 relevant=true로 판단해라\n" +
+          "- keywords는 1~3개의 짧은 명사형 (예: \"연차\", \"휴가 신청\")",
       },
       { role: "user", content: question },
     ],
   });
 
-  const raw = res.choices[0]?.message?.content?.trim() ?? "[]";
+  const raw = res.choices[0]?.message?.content?.trim() ?? "{}";
   try {
-    const match = raw.match(/\[[\s\S]*\]/);
-    const keywords = JSON.parse(match ? match[0] : raw);
-    if (Array.isArray(keywords) && keywords.length > 0) {
-      return keywords.map(String).slice(0, 3);
-    }
+    const parsed = JSON.parse(raw);
+    const keywords = Array.isArray(parsed.keywords)
+      ? parsed.keywords.map(String).filter(Boolean).slice(0, 3)
+      : [];
+    if (parsed.relevant === false) return { relevant: false, keywords: [] };
+    return { relevant: true, keywords: keywords.length > 0 ? keywords : [question.slice(0, 30)] };
   } catch {
-    // 파싱 실패 시 아래 폴백 사용
+    // 파싱 실패 시 질문을 막지 않도록 통과시킴 (fail-open)
+    return { relevant: true, keywords: [question.slice(0, 30)] };
   }
-  return [question.slice(0, 30)];
 }
 
 const SYSTEM_PROMPT = `너는 '세렝게티 가이드봇'이다. 사내 노션 문서를 근거로 구성원의 질문에 답하는 슬랙 봇이다.
@@ -50,6 +57,7 @@ const SYSTEM_PROMPT = `너는 '세렝게티 가이드봇'이다. 사내 노션 �
 - 답변은 대체로 10줄 이내로 유지한다.
 
 [제약사항]
+- 회사 생활·사내 제도와 무관한 질문(요리 레시피, 일반 상식, 번역, 코딩 등)에는 답하지 않고, 사내 가이드 관련 질문만 도울 수 있다고 안내한다.
 - 특정 개인의 개인정보(연락처, 주소, 주민등록번호, 급여, 평가 등)는 문서에 있더라도 답하지 않고, 해당 정보는 담당 부서에 직접 문의하도록 안내한다.
 - 회사 정책에 대한 확정적 해석이 필요한 사안(징계, 법률, 계약 등)은 문서 내용을 전달하되 최종 확인은 담당 부서에 하도록 덧붙인다.`;
 

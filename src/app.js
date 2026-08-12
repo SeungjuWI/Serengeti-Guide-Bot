@@ -1,7 +1,7 @@
 import "dotenv/config";
 import bolt from "@slack/bolt";
 import { searchNotionPages } from "./notion.js";
-import { extractSearchKeywords, generateAnswer } from "./llm.js";
+import { analyzeQuestion, generateAnswer } from "./llm.js";
 
 const { App } = bolt;
 
@@ -18,9 +18,18 @@ const app = new App({
   socketMode: true,
 });
 
-/** 질문 → 키워드 추출 → 노션 검색 → 답변 생성 */
+const OFF_TOPIC_REPLY =
+  "저는 노션 *세렝게티 생활 가이드*를 기반으로 회사 생활 관련 질문에 답하는 봇이에요. 🦁\n" +
+  "인사규정, 휴가, 복리후생, 회의실 예약, 근무환경 같은 질문을 해주세요!";
+
+/** 질문 → 분류·키워드 추출 → 노션 검색 → 답변 생성 */
 async function answerQuestion(question) {
-  const keywords = await extractSearchKeywords(question);
+  const { relevant, keywords } = await analyzeQuestion(question);
+
+  if (!relevant) {
+    console.log(`질문: "${question}" / 사내 가이드와 무관 → 차단`);
+    return OFF_TOPIC_REPLY;
+  }
   console.log(`질문: "${question}" / 검색 키워드: ${keywords.join(", ")}`);
 
   const docs = await searchNotionPages(keywords);
