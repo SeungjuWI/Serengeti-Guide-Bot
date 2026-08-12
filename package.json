@@ -1,0 +1,19 @@
+{
+  "name": "serengeti-guide-bot",
+  "version": "0.1.0",
+  "description": "노션 문서를 검색해서 답변해주는 사내 슬랙 가이드봇",
+  "type": "module",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.15",
+    "@slack/bolt": "^3.19.0",
+    "dotenv": "^16.4.5",
+    "openai": "^4.67.0"
+  }
+}
