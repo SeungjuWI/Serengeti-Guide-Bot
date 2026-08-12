@@ -6,9 +6,11 @@ const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 /**
  * 질문이 사내 가이드 관련인지 분류하고, 관련이면 노션 검색용 키워드를 추출.
  * 노션 Search API는 문장 검색에 약해서, 짧은 키워드 2~3개로 나눠 검색한다.
+ * @param {string} question
+ * @param {string} history 이전 대화 내용 (없으면 빈 문자열)
  * @returns {Promise<{relevant: boolean, keywords: string[]}>}
  */
-export async function analyzeQuestion(question) {
+export async function analyzeQuestion(question, history = "") {
   const res = await openai.chat.completions.create({
     model: MODEL,
     temperature: 0,
@@ -24,9 +26,13 @@ export async function analyzeQuestion(question) {
           'JSON으로만 답해라: {"relevant": true 또는 false, "keywords": ["키워드1", "키워드2"]}\n' +
           "- 회사와 무관한 질문(요리 레시피, 일반 상식, 번역, 숙제, 코딩, 잡담 등)이면 relevant=false, keywords=[]\n" +
           "- 회사 관련인지 애매하면 relevant=true로 판단해라\n" +
-          "- keywords는 1~3개의 짧은 명사형 (예: \"연차\", \"휴가 신청\")",
+          "- keywords는 1~3개의 짧은 명사형 (예: \"연차\", \"휴가 신청\")\n" +
+          "- 이전 대화가 주어지면 현재 질문을 그 맥락에서 해석해라 (예: 연차 얘기 중 \"그럼 반차는?\" → 키워드 \"반차\")",
       },
-      { role: "user", content: question },
+      {
+        role: "user",
+        content: history ? `[이전 대화]\n${history}\n\n[현재 질문]\n${question}` : question,
+      },
     ],
   });
 
@@ -48,8 +54,15 @@ const SYSTEM_PROMPT = `너는 '세렝게티 가이드봇'이다. 사내 노션 �
 
 [답변 원칙]
 - 반드시 아래에 제공되는 노션 문서 내용만을 근거로 답한다. 문서에 없는 내용은 절대 지어내지 않는다.
-- 근거가 부족하면 솔직하게 "관련 내용을 노션에서 찾지 못했어요"라고 말하고, 담당 부서(예: HR팀)에 문의하도록 안내한다.
+- 이전 대화가 주어지면 현재 질문을 그 맥락에서 해석해 이어지는 답변을 한다.
 - 답변에 사용한 문서의 노션 링크를 답변 끝에 "📎 참고 문서" 항목으로 붙인다.
+
+[문서를 찾지 못했거나 문서로 답할 수 없는 경우]
+- 솔직하게 "관련 내용을 노션에서 찾지 못했어요"라고 말한 뒤, 질문 주제에 맞는 담당팀 문의 방법을 안내한다:
+  - 인사규정/복리후생 관련 → Slack #co_operations 채널에서 @hr_team 태그
+  - 근무환경/계약/자산관리 관련 → Slack #co_operations 채널에서 @ga_team 태그
+  - 아이디어 제안/건의/불편사항 → Slack #co_operations 채널에서 @likelion_bamboo 태그
+- 이어서 바로 복사해 쓸 수 있는 문의 문안을 "✍️ 문의 예시" 항목으로 만들어준다. 문안은 정중하고 간결하게, 질문 내용이 구체적으로 담기게 작성한다.
 
 [톤앤매너]
 - 친절한 존댓말을 쓰되, 간결하게 핵심부터 말한다.
@@ -65,8 +78,9 @@ const SYSTEM_PROMPT = `너는 '세렝게티 가이드봇'이다. 사내 노션 �
  * 노션 문서들을 근거로 답변 생성.
  * @param {string} question
  * @param {Array<{title: string, url: string, content: string}>} docs
+ * @param {string} history 이전 대화 내용 (없으면 빈 문자열)
  */
-export async function generateAnswer(question, docs) {
+export async function generateAnswer(question, docs, history = "") {
   const context =
     docs.length > 0
       ? docs
@@ -85,7 +99,9 @@ export async function generateAnswer(question, docs) {
       { role: "system", content: SYSTEM_PROMPT },
       {
         role: "user",
-        content: `[노션 검색 결과]\n${context}\n\n[질문]\n${question}`,
+        content:
+          (history ? `[이전 대화]\n${history}\n\n` : "") +
+          `[노션 검색 결과]\n${context}\n\n[질문]\n${question}`,
       },
     ],
   });
