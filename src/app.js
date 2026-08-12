@@ -118,27 +118,29 @@ async function handleQuestion({ text, channel, ts, threadTs, isDm, client }) {
     return;
   }
 
-  // 처리 중임을 표시
-  await client.reactions.add({ channel, timestamp: ts, name: "eyes" }).catch(() => {});
+  // "찾아보는 중" 메시지를 먼저 띄우고, 답변이 완성되면 그 메시지를 교체
+  const placeholder = await client.chat.postMessage({
+    channel,
+    thread_ts: replyTs,
+    text: "🔍 노션 문서를 찾아보는 중이에요...",
+  });
 
   try {
     const history = await getConversationContext({ client, channel, ts, threadTs, isDm });
     const answer = await answerQuestion(question, history);
-    await client.chat.postMessage({
+    await client.chat.update({
       channel,
-      thread_ts: replyTs,
+      ts: placeholder.ts,
       text: answer.text,
       ...(answer.withFeedback ? { blocks: feedbackBlocks(answer.text, question, answer.docTitles) } : {}),
     });
   } catch (err) {
     console.error("답변 처리 중 오류:", err);
-    await client.chat.postMessage({
+    await client.chat.update({
       channel,
-      thread_ts: replyTs,
+      ts: placeholder.ts,
       text: "죄송해요, 답변을 만드는 중에 오류가 발생했어요. 잠시 후 다시 시도해주세요. 🙏",
     });
-  } finally {
-    await client.reactions.remove({ channel, timestamp: ts, name: "eyes" }).catch(() => {});
   }
 }
 
@@ -237,6 +239,69 @@ app.action("report_error", async ({ ack, body, action, client }) => {
       ? "🚨 신고 접수! 담당팀에 전달됐어요. 감사합니다."
       : "🚨 신고가 기록됐어요. 감사합니다.",
   });
+});
+
+// App Home 탭: 봇 소개 및 사용법
+app.event("app_home_opened", async ({ event, client }) => {
+  if (event.tab !== "home") return;
+  await client.views
+    .publish({
+      user_id: event.user,
+      view: {
+        type: "home",
+        blocks: [
+          {
+            type: "header",
+            text: { type: "plain_text", text: "🦁 세렝게티 가이드봇" },
+          },
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text:
+                "노션 *세렝게티 생활 가이드*를 검색해서 회사 생활 관련 질문에 답해드려요.\n" +
+                "인사규정, 휴가, 복리후생, 회의실/장비 예약, 근무환경 등을 물어보세요!",
+            },
+          },
+          { type: "divider" },
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text:
+                "*사용 방법*\n" +
+                "• *DM*: 왼쪽 메시지 탭에서 바로 질문을 보내주세요\n" +
+                "• *채널*: `@Serengeti Guide Bot 질문내용` 으로 멘션해주세요\n" +
+                "• 답변 스레드에서 이어서 질문하면 맥락을 이해하고 답해드려요",
+            },
+          },
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text:
+                "*이런 질문을 할 수 있어요*\n" +
+                "• 연차 휴가 신청 어떻게 해?\n" +
+                "• 회의실 예약은 어디서 해?\n" +
+                "• 경조사 지원 제도 알려줘",
+            },
+          },
+          { type: "divider" },
+          {
+            type: "context",
+            elements: [
+              {
+                type: "mrkdwn",
+                text:
+                  "답변이 도움됐다면 👍, 아쉬웠다면 👎를 눌러주세요 — 봇 개선에 큰 도움이 돼요.\n" +
+                  "문서 내용이 잘못됐다면 🚨 버튼으로 신고해주세요. 답을 못 찾은 질문은 담당팀 문의 방법을 안내해드려요.",
+              },
+            ],
+          },
+        ],
+      },
+    })
+    .catch((err) => console.error("App Home 게시 실패:", err.message));
 });
 
 await app.start();
