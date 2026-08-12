@@ -2,6 +2,7 @@ import "dotenv/config";
 import bolt from "@slack/bolt";
 import { searchNotionPages } from "./notion.js";
 import { analyzeQuestion, generateAnswer } from "./llm.js";
+import { logEvent } from "./store.js";
 
 const { App } = bolt;
 
@@ -28,14 +29,48 @@ async function answerQuestion(question) {
 
   if (!relevant) {
     console.log(`질문: "${question}" / 사내 가이드와 무관 → 차단`);
-    return OFF_TOPIC_REPLY;
+    await logEvent({ type: "question", question, outcome: "blocked" });
+    return { text: OFF_TOPIC_REPLY, withFeedback: false };
   }
   console.log(`질문: "${question}" / 검색 키워드: ${keywords.join(", ")}`);
 
   const docs = await searchNotionPages(keywords);
   console.log(`검색된 문서 ${docs.length}건: ${docs.map((d) => d.title).join(", ") || "없음"}`);
 
-  return generateAnswer(question, docs);
+  const answer = await generateAnswer(question, docs);
+  await logEvent({
+    type: "question",
+    question,
+    outcome: docs.length > 0 ? "answered" : "no_docs",
+    keywords,
+    docs: docs.map((d) => d.title),
+  });
+  return { text: answer, withFeedback: true };
+}
+
+/** 답변 메시지에 붙는 👍👎 피드백 버튼 */
+function feedbackBlocks(answerText, question) {
+  return [
+    { type: "section", text: { type: "mrkdwn", text: answerText.slice(0, 2900) } },
+    {
+      type: "actions",
+      block_id: "feedback",
+      elements: [
+        {
+          type: "button",
+          text: { type: "plain_text", text: "👍 도움됐어요" },
+          action_id: "feedback_up",
+          value: question.slice(0, 500),
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "👎 아쉬워요" },
+          action_id: "feedback_down",
+          value: question.slice(0, 500),
+        },
+      ],
+    },
+  ];
 }
 
 /** 멘션/DM 공통 처리 */
@@ -56,7 +91,12 @@ async function handleQuestion({ text, channel, ts, client }) {
 
   try {
     const answer = await answerQuestion(question);
-    await client.chat.postMessage({ channel, thread_ts: ts, text: answer });
+    await client.chat.postMessage({
+      channel,
+      thread_ts: ts,
+      text: answer.text,
+      ...(answer.withFeedback ? { blocks: feedbackBlocks(answer.text, question) } : {}),
+    });
   } catch (err) {
     console.error("답변 처리 중 오류:", err);
     await client.chat.postMessage({
@@ -79,6 +119,36 @@ app.message(async ({ message, client }) => {
   if (message.channel_type !== "im") return;
   if (message.subtype || message.bot_id) return; // 봇/시스템 메시지 무시
   await handleQuestion({ text: message.text ?? "", channel: message.channel, ts: message.ts, client });
+});
+
+/** 피드백 버튼 클릭 처리: 기록하고, 버튼을 감사 문구로 교체 */
+async function handleFeedback({ body, action, client, vote }) {
+  await logEvent({ type: "feedback", vote, question: action.value });
+
+  const thanks =
+    vote === "up"
+      ? "🙏 피드백 감사해요! (👍 도움됐어요)"
+      : "🙏 피드백 감사해요! (👎 아쉬워요) — 답변 개선에 참고할게요.";
+
+  const original = body.message?.blocks?.filter((b) => b.type !== "actions") ?? [];
+  await client.chat
+    .update({
+      channel: body.channel.id,
+      ts: body.message.ts,
+      text: body.message.text,
+      blocks: [...original, { type: "context", elements: [{ type: "mrkdwn", text: thanks }] }],
+    })
+    .catch((err) => console.error("피드백 메시지 갱신 실패:", err.message));
+}
+
+app.action("feedback_up", async ({ ack, body, action, client }) => {
+  await ack();
+  await handleFeedback({ body, action, client, vote: "up" });
+});
+
+app.action("feedback_down", async ({ ack, body, action, client }) => {
+  await ack();
+  await handleFeedback({ body, action, client, vote: "down" });
 });
 
 await app.start();

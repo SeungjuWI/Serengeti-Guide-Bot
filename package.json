@@ -5,7 +5,8 @@
   "type": "module",
   "main": "src/app.js",
   "scripts": {
-    "start": "node src/app.js"
+    "start": "node src/app.js",
+    "stats": "node scripts/stats.js"
   },
   "engines": {
     "node": ">=18"
