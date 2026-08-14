@@ -1,6 +1,7 @@
 import "dotenv/config";
 import bolt from "@slack/bolt";
 import { searchNotionPages } from "./notion.js";
+import { searchIndex, startIndexScheduler } from "./search.js";
 import { analyzeQuestion, generateAnswer } from "./llm.js";
 import { logEvent } from "./store.js";
 
@@ -34,8 +35,12 @@ async function answerQuestion(question, history = "") {
   }
   console.log(`질문: "${question}" / 검색 키워드: ${keywords.join(", ")}`);
 
-  const docs = await searchNotionPages(keywords);
-  console.log(`검색된 문서 ${docs.length}건: ${docs.map((d) => d.title).join(", ") || "없음"}`);
+  // 의미 기반(임베딩) 검색을 우선 사용, 인덱스가 아직 없으면 키워드 검색으로 폴백
+  const query = [...keywords, question].join("\n").slice(0, 1000);
+  let docs = await searchIndex(query);
+  const searchMode = docs ? "임베딩" : "키워드";
+  if (!docs) docs = await searchNotionPages(keywords);
+  console.log(`검색(${searchMode}) 문서 ${docs.length}건: ${docs.map((d) => d.title).join(", ") || "없음"}`);
 
   const answer = await generateAnswer(question, docs, history);
   await logEvent({
@@ -306,3 +311,6 @@ app.event("app_home_opened", async ({ event, client }) => {
 
 await app.start();
 console.log("⚡ 세렝게티 가이드봇이 실행됐어요 (Socket Mode)");
+
+// 검색 인덱스: 없으면 백그라운드로 구축, 이후 주기적 자동 갱신 (INDEX_REFRESH_HOURS, 기본 24시간)
+startIndexScheduler();

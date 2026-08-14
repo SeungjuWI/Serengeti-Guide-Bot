@@ -2,6 +2,18 @@ import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
+
+/**
+ * 텍스트 배열을 임베딩 벡터로 변환 (의미 기반 검색용).
+ * @param {string[]} texts
+ * @returns {Promise<number[][]>}
+ */
+export async function embedTexts(texts) {
+  const input = texts.map((t) => (t || " ").slice(0, 3000)); // 임베딩 모델 토큰 한도 보호
+  const res = await openai.embeddings.create({ model: EMBEDDING_MODEL, input });
+  return res.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
+}
 
 /**
  * 질문이 사내 가이드 관련인지 분류하고, 관련이면 노션 검색용 키워드를 추출.
@@ -27,6 +39,7 @@ export async function analyzeQuestion(question, history = "") {
           "- 회사와 무관한 질문(요리 레시피, 일반 상식, 번역, 숙제, 코딩, 잡담 등)이면 relevant=false, keywords=[]\n" +
           "- 회사 관련인지 애매하면 relevant=true로 판단해라\n" +
           "- keywords는 1~3개의 짧은 명사형 (예: \"연차\", \"휴가 신청\")\n" +
+          '- 질문에 오타가 있어 보이면 의도한 단어로 고쳐서 키워드를 뽑아라 (예: "휴갸" → "휴가", "밥갑" → "밥값", "식데" → "식대")\n' +
           "- 이전 대화가 주어지면 현재 질문을 그 맥락에서 해석해라 (예: 연차 얘기 중 \"그럼 반차는?\" → 키워드 \"반차\")",
       },
       {
