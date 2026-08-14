@@ -219,7 +219,7 @@ export async function searchIndex(query, keywords = []) {
     let entry = byPage.get(doc.id);
     if (!entry) {
       if (byPage.size >= MAX_RESULTS) continue;
-      entry = { title: doc.title, url: doc.url, chunks: [] };
+      entry = { title: doc.title, url: doc.url, score, chunks: [] }; // score = 그 페이지 최고 청크 점수
       byPage.set(doc.id, entry);
     }
     if (entry.chunks.length < MAX_CHUNKS_PER_PAGE) entry.chunks.push(doc);
@@ -228,6 +228,7 @@ export async function searchIndex(query, keywords = []) {
   return [...byPage.values()].map((entry) => ({
     title: entry.title,
     url: entry.url,
+    score: Math.round(entry.score * 1000) / 1000,
     content: entry.chunks
       .sort((a, b) => (a.chunk ?? 0) - (b.chunk ?? 0))
       .map((c) => c.content)
