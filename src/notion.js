@@ -5,6 +5,7 @@ const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const MAX_PAGES = 4; // 답변 컨텍스트에 넣을 최대 페이지 수
 const MAX_CHARS_PER_PAGE = 4000; // 페이지당 최대 글자 수 (토큰 비용 제어)
 const MAX_BLOCK_DEPTH = 2; // 중첩 블록(토글 등) 탐색 깊이
+const MAX_CHILD_PAGE_DEPTH = 2; // 하위 페이지 탐색 깊이 (페이지 안의 페이지)
 
 /** rich_text 배열을 일반 텍스트로 변환 */
 function richTextToPlain(richText = []) {
@@ -56,7 +57,7 @@ function blockToText(block) {
 }
 
 /** 페이지의 블록들을 재귀적으로 읽어 텍스트로 합침 */
-async function getBlocksText(blockId, depth = 0, budget = { chars: MAX_CHARS_PER_PAGE }) {
+async function getBlocksText(blockId, depth = 0, budget = { chars: MAX_CHARS_PER_PAGE }, pageDepth = 0) {
   if (depth > MAX_BLOCK_DEPTH || budget.chars <= 0) return "";
 
   const lines = [];
@@ -71,14 +72,30 @@ async function getBlocksText(blockId, depth = 0, budget = { chars: MAX_CHARS_PER
     for (const block of res.results) {
       if (budget.chars <= 0) break;
 
+      // 하위 페이지는 제목을 표시하고 본문까지 따라 들어가서 읽음
+      if (block.type === "child_page") {
+        if (pageDepth >= MAX_CHILD_PAGE_DEPTH) continue;
+        const title = block.child_page?.title;
+        if (title) {
+          const line = `\n[하위문서: ${title}]`.slice(0, budget.chars);
+          lines.push(line);
+          budget.chars -= line.length;
+        }
+        const childText = await getBlocksText(block.id, 0, budget, pageDepth + 1);
+        if (childText) lines.push(childText);
+        continue;
+      }
+      // 하위 데이터베이스는 별도 query API가 필요해서 아직 미지원
+      if (block.type === "child_database") continue;
+
       const text = blockToText(block);
       if (text && text.trim()) {
         const line = text.slice(0, budget.chars);
         lines.push(line);
         budget.chars -= line.length;
       }
-      if (block.has_children && block.type !== "child_page" && block.type !== "child_database") {
-        const childText = await getBlocksText(block.id, depth + 1, budget);
+      if (block.has_children) {
+        const childText = await getBlocksText(block.id, depth + 1, budget, pageDepth);
         if (childText) lines.push(childText);
       }
     }
