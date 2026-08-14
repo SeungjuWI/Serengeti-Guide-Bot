@@ -7,15 +7,17 @@ import { embedTexts } from "./llm.js";
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 const INDEX_FILE = path.join(DATA_DIR, "index.json");
 
-const INDEX_VERSION = 2; // 인덱스 형식이 바뀌면 올림 → 이전 인덱스는 버리고 전체 재구축
+const INDEX_VERSION = 3; // 인덱스 형식이 바뀌면 올림 → 이전 인덱스는 버리고 전체 재구축
 const MAX_RESULTS = 4; // 답변 컨텍스트에 넣을 최대 페이지 수
 const MAX_CHUNKS_PER_PAGE = 2; // 페이지당 답변에 넣을 최대 청크 수
 const MIN_SCORE = 0.2; // 이보다 관련도가 낮은 청크는 버림
 const EMBED_BATCH = 30; // 임베딩 API 한 번에 보낼 청크 수
 const READ_CONCURRENCY = 3; // 노션 본문 읽기 동시 실행 수 (API 요청 제한 고려)
 const MAX_INDEX_CHARS = 20000; // 인덱싱 시 페이지당 읽을 최대 글자 수
-const CHUNK_CHARS = 1400; // 청크 하나의 목표 길이
-const MIN_CHUNK_CHARS = 300; // 이보다 짧을 땐 제목이 나와도 청크를 끊지 않음
+const CHUNK_CHARS = 1400; // 청크 하나의 최대 길이
+const STANDALONE_SECTION_CHARS = 400; // 이 이상인 섹션은 독립 청크로 (다른 섹션과 안 섞음)
+const TERM_BOOST = 0.15; // 검색어가 본문에 실제 등장할 때 최대 가점
+const THIN_CONTENT_PENALTY = 0.05; // 내용이 거의 없는 페이지 감점 (제목만으로 상위 독식 방지)
 
 /** OpenAI 임베딩은 길이가 1로 정규화되어 있어 내적이 곧 코사인 유사도 */
 function similarity(a, b) {
@@ -24,26 +26,59 @@ function similarity(a, b) {
   return sum;
 }
 
+/** 줄 단위로 CHUNK_CHARS 이하가 되게 나눔 */
+function packLines(text) {
+  const out = [];
+  let acc = "";
+  for (const line of text.split("\n")) {
+    if (acc && acc.length + line.length > CHUNK_CHARS) {
+      out.push(acc);
+      acc = line;
+    } else {
+      acc = acc ? `${acc}\n${line}` : line;
+    }
+  }
+  if (acc.trim()) out.push(acc);
+  return out;
+}
+
 /**
  * 긴 본문을 섹션(제목) 경계 기준으로 청크로 나눔.
  * 페이지 전체를 벡터 하나로 만들면 뒷부분 내용이 검색에서 묻히기 때문.
+ * 내용이 충분한 섹션은 독립 청크가 되고, 짧은 섹션들만 이웃끼리 합침.
  */
-function splitIntoChunks(content) {
-  const chunks = [];
-  let current = "";
+export function splitIntoChunks(content) {
+  // 1) 제목/하위문서 표시가 나올 때마다 섹션으로 나눔
+  const sections = [];
+  let cur = [];
   for (const line of content.split("\n")) {
-    const isSectionStart = /^#{1,3} |^\[하위문서: |^\[하위 데이터베이스: /.test(line);
-    const shouldCut =
-      current.length > 0 &&
-      (current.length + line.length > CHUNK_CHARS || (isSectionStart && current.length >= MIN_CHUNK_CHARS));
-    if (shouldCut) {
-      chunks.push(current);
-      current = line;
+    if (/^#{1,3} |^\[하위문서: |^\[하위 데이터베이스: /.test(line) && cur.length > 0) {
+      sections.push(cur.join("\n"));
+      cur = [];
+    }
+    cur.push(line);
+  }
+  if (cur.length > 0) sections.push(cur.join("\n"));
+
+  // 2) 큰 섹션은 그대로 청크로, 작은 섹션들은 이웃끼리 합쳐서 청크로
+  const chunks = [];
+  let acc = "";
+  const flush = () => {
+    if (acc.trim()) chunks.push(acc);
+    acc = "";
+  };
+  for (const section of sections) {
+    if (section.length >= STANDALONE_SECTION_CHARS) {
+      flush();
+      chunks.push(...packLines(section));
+    } else if (acc.length + section.length > CHUNK_CHARS) {
+      flush();
+      acc = section;
     } else {
-      current = current ? `${current}\n${line}` : line;
+      acc = acc ? `${acc}\n${section}` : section;
     }
   }
-  if (current.trim()) chunks.push(current);
+  flush();
   return chunks.length > 0 ? chunks : [""];
 }
 
@@ -145,11 +180,12 @@ export async function buildIndex({ log = () => {} } = {}) {
 
 /**
  * 질문과 의미가 가까운 청크를 찾아 페이지 단위로 묶어 반환.
+ * keywords(LLM이 추출한 검색어)가 본문에 실제 등장하면 가점을 줘서 정확한 용어 질문을 보강.
  * 본문은 인덱스에 저장된 것을 사용 — 노션 변경사항은 다음 인덱스 갱신 때 반영됨.
  * 인덱스가 아직 없으면 null 반환 (호출부에서 키워드 검색으로 폴백).
  * @returns {Promise<Array<{title: string, url: string, content: string}> | null>}
  */
-export async function searchIndex(query) {
+export async function searchIndex(query, keywords = []) {
   let index;
   try {
     index = await loadIndex();
@@ -159,8 +195,21 @@ export async function searchIndex(query) {
   if (index.docs.length === 0) return null;
 
   const [queryVec] = await embedTexts([query]);
+  const termSource = keywords.length > 0 ? keywords : query.split(/\s+/);
+  const terms = [...new Set(termSource.map((t) => t.trim().toLowerCase()).filter((t) => t.length >= 2))];
   const scored = index.docs
-    .map((doc) => ({ doc, score: similarity(queryVec, doc.embedding) }))
+    .map((doc) => {
+      let score = similarity(queryVec, doc.embedding);
+      // 검색어가 제목/본문에 실제로 등장하면 가점 (의미는 비슷한데 엉뚱한 문서가 이기는 것 방지)
+      if (terms.length > 0) {
+        const haystack = `${doc.title}\n${doc.content}`.toLowerCase();
+        const hits = terms.filter((t) => haystack.includes(t)).length;
+        score += TERM_BOOST * (hits / terms.length);
+      }
+      // 내용이 거의 없는 페이지는 감점 (제목만 비슷한 빈 페이지가 상위 독식하는 것 방지)
+      if (doc.content.length < 80) score -= THIN_CONTENT_PENALTY;
+      return { doc, score };
+    })
     .sort((a, b) => b.score - a.score);
 
   // 상위 청크부터 페이지 단위로 묶음: 최대 4개 페이지, 페이지당 최대 2개 청크

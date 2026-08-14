@@ -37,7 +37,7 @@ async function answerQuestion(question, history = "") {
 
   // 의미 기반(임베딩) 검색을 우선 사용, 인덱스가 아직 없으면 키워드 검색으로 폴백
   const query = [...keywords, question].join("\n").slice(0, 1000);
-  let docs = await searchIndex(query);
+  let docs = await searchIndex(query, keywords);
   const searchMode = docs ? "임베딩" : "키워드";
   if (!docs) docs = await searchNotionPages(keywords);
   console.log(`검색(${searchMode}) 문서 ${docs.length}건: ${docs.map((d) => d.title).join(", ") || "없음"}`);
