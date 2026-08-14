@@ -4,20 +4,39 @@ const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
 const MAX_PAGES = 4; // 답변 컨텍스트에 넣을 최대 페이지 수
 const MAX_CHARS_PER_PAGE = 4000; // 페이지당 최대 글자 수 (토큰 비용 제어)
-const MAX_BLOCK_DEPTH = 2; // 중첩 블록(토글 등) 탐색 깊이
+const MAX_BLOCK_DEPTH = 5; // 중첩 블록(토글 등) 탐색 깊이
+// 컬럼 같은 레이아웃 블록은 내용 중첩이 아니므로 깊이 계산에서 제외
+const LAYOUT_BLOCK_TYPES = new Set(["column_list", "column", "synced_block"]);
 const MAX_CHILD_PAGE_DEPTH = 2; // 하위 페이지 탐색 깊이 (페이지 안의 페이지)
 
-/** 노션 API 호출 재시도 (요청 제한 429, 일시적 서버 오류 대비) */
-async function withRetry(fn, tries = 5) {
+// 노션 API는 평균 초당 3회로 제한됨 — 전역으로 요청 간격을 띄워 429를 예방
+const REQUEST_GAP_MS = 350;
+let nextRequestAt = 0;
+async function throttle() {
+  const now = Date.now();
+  const wait = nextRequestAt - now;
+  nextRequestAt = Math.max(now, nextRequestAt) + REQUEST_GAP_MS;
+  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+}
+
+/** 노션 API 호출 재시도 (요청 제한 429는 노션이 알려주는 시간만큼 대기, 일시적 서버 오류는 지수 백오프) */
+async function withRetry(fn, tries = 6) {
   let lastErr;
   for (let i = 0; i < tries; i++) {
     try {
+      await throttle();
       return await fn();
     } catch (err) {
       lastErr = err;
-      const retryable = err?.code === "rate_limited" || err?.status === 429 || err?.status >= 500;
+      const rateLimited = err?.code === "rate_limited" || err?.status === 429;
+      const retryable = rateLimited || err?.status >= 500;
       if (!retryable || i === tries - 1) throw err;
-      await new Promise((resolve) => setTimeout(resolve, 1000 * (i + 1)));
+
+      const retryAfterSec = Number(err?.headers?.get?.("retry-after") ?? 0);
+      const waitMs = rateLimited && retryAfterSec > 0
+        ? Math.min(retryAfterSec, 300) * 1000
+        : 1000 * 2 ** i;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
   }
   throw lastErr;
@@ -67,8 +86,28 @@ function blockToText(block) {
       return richTextToPlain(data.rich_text);
     case "table_row":
       return (data.cells ?? []).map((cell) => richTextToPlain(cell)).join(" | ");
+    case "file":
+    case "pdf": {
+      const name = data.name || richTextToPlain(data.caption) || fileNameFromUrl(data);
+      return name ? `[파일: ${name}]` : null;
+    }
+    case "bookmark":
+    case "embed": {
+      const caption = richTextToPlain(data.caption);
+      return caption || data.url || null;
+    }
     default:
       return null;
+  }
+}
+
+/** 파일/PDF 블록의 URL에서 파일명 추출 */
+function fileNameFromUrl(data) {
+  const url = data.file?.url ?? data.external?.url ?? "";
+  try {
+    return decodeURIComponent(url.split("?")[0].split("/").pop() ?? "");
+  } catch {
+    return "";
   }
 }
 
@@ -122,7 +161,8 @@ async function getBlocksText(blockId, depth = 0, budget = { chars: MAX_CHARS_PER
         budget.chars -= line.length;
       }
       if (block.has_children) {
-        const childText = await getBlocksText(block.id, depth + 1, budget, pageDepth);
+        const nextDepth = LAYOUT_BLOCK_TYPES.has(block.type) ? depth : depth + 1;
+        const childText = await getBlocksText(block.id, nextDepth, budget, pageDepth);
         if (childText) lines.push(childText);
       }
     }
@@ -251,8 +291,9 @@ export async function listAllPages() {
 /**
  * 페이지 하나의 본문을 읽음.
  * followChildPages=false면 하위 페이지는 제목만 남김 (인덱스에선 하위 페이지가 각자 항목이 되므로 중복 방지).
+ * maxChars로 읽을 분량 조절 가능 (인덱싱은 긴 페이지도 끝까지 읽도록 크게 잡음).
  */
-export async function readPageContent(pageId, { followChildPages = true } = {}) {
+export async function readPageContent(pageId, { followChildPages = true, maxChars = MAX_CHARS_PER_PAGE } = {}) {
   const startPageDepth = followChildPages ? 0 : MAX_CHILD_PAGE_DEPTH;
-  return getBlocksText(pageId, 0, { chars: MAX_CHARS_PER_PAGE }, startPageDepth);
+  return getBlocksText(pageId, 0, { chars: maxChars }, startPageDepth);
 }
