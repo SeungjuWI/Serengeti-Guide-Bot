@@ -9,6 +9,27 @@ const MAX_BLOCK_DEPTH = 5; // 중첩 블록(토글 등) 탐색 깊이
 const LAYOUT_BLOCK_TYPES = new Set(["column_list", "column", "synced_block"]);
 const MAX_CHILD_PAGE_DEPTH = 2; // 하위 페이지 탐색 깊이 (페이지 안의 페이지)
 
+// 검색·인덱싱에서 제외할 페이지. 해당 페이지 본문만 제외되고, 하위 페이지는 각각 별도로 인덱싱된다.
+// NOTION_EXCLUDED_PAGE_IDS 환경변수(쉼표 구분)로 추가 가능.
+const EXCLUDED_PAGE_IDS = new Set(
+  [
+    "dc9a0c8908194a48900ec223c039dc0f", // LIKELION_Culture
+    ...(process.env.NOTION_EXCLUDED_PAGE_IDS ?? "").split(","),
+  ]
+    .map(normalizePageId)
+    .filter(Boolean)
+);
+
+/** 노션 페이지 ID는 하이픈 유무가 섞여 쓰이므로 비교 전에 형태를 통일 */
+function normalizePageId(id) {
+  return String(id ?? "").trim().toLowerCase().replace(/-/g, "");
+}
+
+/** 답변 근거로 쓰지 않기로 한 페이지인지 */
+export function isExcludedPage(id) {
+  return EXCLUDED_PAGE_IDS.has(normalizePageId(id));
+}
+
 // 노션 API는 평균 초당 3회로 제한됨 — 전역으로 요청 간격을 띄워 429를 예방
 const REQUEST_GAP_MS = 350;
 let nextRequestAt = 0;
@@ -129,8 +150,9 @@ async function getBlocksText(blockId, depth = 0, budget = { chars: MAX_CHARS_PER
     for (const block of res.results) {
       if (budget.chars <= 0) break;
 
-      // 하위 페이지는 제목을 표시하고 본문까지 따라 들어가서 읽음
+      // 하위 페이지는 제목을 표시하고 본문까지 따라 들어가서 읽음 (제외 페이지는 통째로 건너뜀)
       if (block.type === "child_page") {
+        if (isExcludedPage(block.id)) continue;
         const title = block.child_page?.title;
         if (title) {
           const line = `\n[하위문서: ${title}]`.slice(0, budget.chars);
@@ -196,6 +218,7 @@ export async function searchNotionPages(keywords) {
       if (pages.length >= MAX_PAGES) break;
       if (seen.has(page.id)) continue;
       seen.add(page.id);
+      if (isExcludedPage(page.id)) continue;
       pages.push(page);
     }
   }
@@ -275,6 +298,7 @@ export async function listAllPages() {
       })
     );
     for (const page of res.results) {
+      if (isExcludedPage(page.id)) continue;
       pages.push({
         id: page.id,
         title: getPageTitle(page),

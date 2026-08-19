@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { listAllPages, readPageContent } from "./notion.js";
+import { listAllPages, readPageContent, isExcludedPage } from "./notion.js";
 import { embedTexts } from "./llm.js";
 
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
@@ -198,6 +198,8 @@ export async function searchIndex(query, keywords = []) {
   const termSource = keywords.length > 0 ? keywords : query.split(/\s+/);
   const terms = [...new Set(termSource.map((t) => t.trim().toLowerCase()).filter((t) => t.length >= 2))];
   const scored = index.docs
+    // 제외 페이지는 인덱스에 남아 있어도 답변 근거로 쓰지 않음 (다음 인덱스 갱신 때 사라짐)
+    .filter((doc) => !isExcludedPage(doc.id))
     .map((doc) => {
       let score = similarity(queryVec, doc.embedding);
       // 검색어가 제목/본문에 실제로 등장하면 가점 (의미는 비슷한데 엉뚱한 문서가 이기는 것 방지)
