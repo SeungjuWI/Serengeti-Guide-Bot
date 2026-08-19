@@ -14,6 +14,7 @@ const MAX_CHILD_PAGE_DEPTH = 2; // 하위 페이지 탐색 깊이 (페이지 안
 const EXCLUDED_PAGE_IDS = new Set(
   [
     "dc9a0c8908194a48900ec223c039dc0f", // LIKELION_Culture
+    "ef5c89580b4542deb7b6dfdc04f50b97",
     ...(process.env.NOTION_EXCLUDED_PAGE_IDS ?? "").split(","),
   ]
     .map(normalizePageId)
