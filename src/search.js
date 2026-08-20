@@ -7,7 +7,7 @@ import { embedTexts } from "./llm.js";
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 const INDEX_FILE = path.join(DATA_DIR, "index.json");
 
-const INDEX_VERSION = 3; // 인덱스 형식이 바뀌면 올림 → 이전 인덱스는 버리고 전체 재구축
+const INDEX_VERSION = 4; // 인덱스 형식이 바뀌면 올림 → 이전 인덱스는 버리고 전체 재구축
 const MAX_RESULTS = 4; // 답변 컨텍스트에 넣을 최대 페이지 수
 const MAX_CHUNKS_PER_PAGE = 2; // 페이지당 답변에 넣을 최대 청크 수
 const MIN_SCORE = 0.2; // 이보다 관련도가 낮은 청크는 버림
@@ -109,8 +109,8 @@ export async function buildIndex({ log = () => {} } = {}) {
     prevByPage.get(doc.id).push(doc);
   }
 
-  log("노션에서 전체 페이지 목록을 가져오는 중...");
-  const pages = await listAllPages();
+  log("노션 루트 페이지에서 하위 페이지를 따라가며 목록을 만드는 중...");
+  const pages = await listAllPages({ log });
   log(`페이지 ${pages.length}개 발견`);
 
   const docs = [];

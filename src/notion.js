@@ -14,12 +14,20 @@ const MAX_CHILD_PAGE_DEPTH = 2; // 하위 페이지 탐색 깊이 (페이지 안
 const EXCLUDED_PAGE_IDS = new Set(
   [
     "dc9a0c8908194a48900ec223c039dc0f", // LIKELION_Culture
-    "ef5c89580b4542deb7b6dfdc04f50b97",
+    "ef5c89580b4542deb7b6dfdc04f50b97", // 경조사 지원 제도
     ...(process.env.NOTION_EXCLUDED_PAGE_IDS ?? "").split(","),
   ]
     .map(normalizePageId)
     .filter(Boolean)
 );
+
+// 봇이 참고하는 루트 페이지 — 이 페이지와 그 아래 모든 하위 페이지(하위 DB의 각 행 포함)만 대상으로 삼는다.
+// NOTION_ROOT_PAGE_ID 환경변수로 교체 가능.
+const ROOT_PAGE_ID = normalizePageId(
+  process.env.NOTION_ROOT_PAGE_ID || "aed88b212dfb4833a1ed2067370f4c41"
+);
+const MAX_TREE_PAGES = 5000; // 순회 안전장치 (순환/과대 트리 대비)
+const MAX_ANCESTOR_HOPS = 10; // 조상 추적 시 최대 거슬러 올라갈 단계
 
 /** 노션 페이지 ID는 하이픈 유무가 섞여 쓰이므로 비교 전에 형태를 통일 */
 function normalizePageId(id) {
@@ -197,6 +205,7 @@ async function getBlocksText(blockId, depth = 0, budget = { chars: MAX_CHARS_PER
 
 /**
  * 키워드들로 노션을 검색하고, 상위 페이지들의 본문까지 읽어서 반환.
+ * 루트 페이지 아래에 있는 문서만 결과로 삼는다.
  * @param {string[]} keywords
  * @returns {Promise<Array<{title: string, url: string, content: string}>>}
  */
@@ -210,7 +219,7 @@ export async function searchNotionPages(keywords) {
     const res = await withRetry(() =>
       notion.search({
         query: keyword,
-        page_size: 3,
+        page_size: 5,
         filter: { property: "object", value: "page" },
       })
     );
@@ -220,6 +229,7 @@ export async function searchNotionPages(keywords) {
       if (seen.has(page.id)) continue;
       seen.add(page.id);
       if (isExcludedPage(page.id)) continue;
+      if (!(await isUnderRoot(page))) continue;
       pages.push(page);
     }
   }
@@ -284,22 +294,76 @@ function getPagePropsText(page) {
 }
 
 /**
- * Integration이 접근 가능한 모든 페이지의 메타데이터를 가져옴 (검색 인덱스 구축용).
- * @returns {Promise<Array<{id: string, title: string, url: string, lastEdited: string, propsText: string}>>}
+ * 페이지 하나가 직접 품고 있는 하위 페이지·하위 DB를 찾음.
+ * 토글·컬럼 등 중첩 블록 안까지 살피되, 하위 페이지 안으로는 들어가지 않는다 (순회는 호출부가 담당).
  */
-export async function listAllPages() {
-  const pages = [];
+async function listChildRefs(pageId) {
+  const refs = [];
+  const stack = [pageId];
+  while (stack.length > 0) {
+    const blockId = stack.pop();
+    let cursor;
+    do {
+      const res = await withRetry(() =>
+        notion.blocks.children.list({ block_id: blockId, page_size: 100, start_cursor: cursor })
+      );
+      for (const block of res.results) {
+        if (block.type === "child_page") {
+          refs.push({ type: "page", id: block.id });
+        } else if (block.type === "child_database") {
+          refs.push({ type: "database", id: block.id });
+        } else if (block.has_children) {
+          stack.push(block.id);
+        }
+      }
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+  }
+  return refs;
+}
+
+/** 데이터베이스의 모든 행(= 페이지)을 가져옴 */
+async function listDatabaseRows(databaseId) {
+  const rows = [];
   let cursor;
   do {
     const res = await withRetry(() =>
-      notion.search({
-        page_size: 100,
-        start_cursor: cursor,
-        filter: { property: "object", value: "page" },
-      })
+      notion.databases.query({ database_id: databaseId, page_size: 100, start_cursor: cursor })
     );
-    for (const page of res.results) {
-      if (isExcludedPage(page.id)) continue;
+    rows.push(...res.results);
+    cursor = res.has_more ? res.next_cursor : undefined;
+  } while (cursor);
+  return rows;
+}
+
+/**
+ * 루트 페이지에서 시작해 하위 페이지를 모두 따라 들어가며 메타데이터를 모음 (검색 인덱스 구축용).
+ * 하위 DB는 각 행이 하나의 페이지로 포함된다.
+ * 제외 페이지는 목록에 넣지 않되, 그 아래 하위 페이지는 계속 따라간다.
+ * @returns {Promise<Array<{id: string, title: string, url: string, lastEdited: string, propsText: string}>>}
+ */
+export async function listAllPages({ log = () => {} } = {}) {
+  const pages = [];
+  const visited = new Set();
+  const queue = [{ id: ROOT_PAGE_ID, page: null }];
+
+  while (queue.length > 0 && pages.length < MAX_TREE_PAGES) {
+    const { id, page: known } = queue.shift();
+    const key = normalizePageId(id);
+    if (visited.has(key)) continue;
+    visited.add(key);
+
+    let page = known;
+    if (!page) {
+      try {
+        page = await withRetry(() => notion.pages.retrieve({ page_id: id }));
+      } catch (err) {
+        log(`페이지 정보 읽기 실패 (${id}): ${err.message}`);
+        continue;
+      }
+    }
+
+    if (!isExcludedPage(page.id)) {
       pages.push({
         id: page.id,
         title: getPageTitle(page),
@@ -308,9 +372,68 @@ export async function listAllPages() {
         propsText: getPagePropsText(page),
       });
     }
-    cursor = res.has_more ? res.next_cursor : undefined;
-  } while (cursor);
+
+    let refs = [];
+    try {
+      refs = await listChildRefs(page.id);
+    } catch (err) {
+      log(`하위 항목 읽기 실패 (${page.id}): ${err.message}`);
+    }
+    for (const ref of refs) {
+      if (ref.type === "page") {
+        queue.push({ id: ref.id, page: null });
+        continue;
+      }
+      try {
+        for (const row of await listDatabaseRows(ref.id)) queue.push({ id: row.id, page: row });
+      } catch (err) {
+        log(`데이터베이스 읽기 실패 (${ref.id}): ${err.message}`);
+      }
+    }
+  }
+
+  // 루트 하위 판별을 굳이 다시 계산하지 않도록 순회 결과를 재사용
+  for (const key of visited) ancestryCache.set(key, true);
   return pages;
+}
+
+const ancestryCache = new Map(); // 정규화된 페이지 ID → 루트 하위 여부
+
+/** 이 페이지가 루트 페이지이거나 그 아래에 있는지 (부모를 거슬러 올라가며 확인) */
+async function isUnderRoot(page) {
+  const chain = [];
+  const remember = (result) => {
+    for (const key of chain) ancestryCache.set(key, result);
+    return result;
+  };
+
+  let node = page;
+  for (let hop = 0; hop < MAX_ANCESTOR_HOPS && node; hop++) {
+    const key = normalizePageId(node.id);
+    if (key === ROOT_PAGE_ID) return remember(true);
+    const cached = ancestryCache.get(key);
+    if (cached !== undefined) return remember(cached);
+    chain.push(key);
+
+    const parent = node.parent;
+    if (!parent || parent.type === "workspace") break;
+    const parentId = parent.page_id ?? parent.database_id ?? parent.block_id;
+    if (!parentId) break;
+    if (normalizePageId(parentId) === ROOT_PAGE_ID) return remember(true);
+
+    try {
+      if (parent.type === "database_id") {
+        node = await withRetry(() => notion.databases.retrieve({ database_id: parentId }));
+      } else if (parent.type === "block_id") {
+        node = await withRetry(() => notion.blocks.retrieve({ block_id: parentId }));
+      } else {
+        node = await withRetry(() => notion.pages.retrieve({ page_id: parentId }));
+      }
+    } catch {
+      break;
+    }
+  }
+  return remember(false);
 }
 
 /**
