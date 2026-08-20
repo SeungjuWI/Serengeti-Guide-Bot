@@ -303,6 +303,16 @@ function getPagePropsText(page) {
       case "checkbox":
         value = prop.checkbox ? "예" : "";
         break;
+      // 담당자·구성원처럼 사람으로만 채워진 속성도 검색 대상이 되어야 한다
+      case "people":
+        value = (prop.people ?? []).map((p) => p.name).filter(Boolean).join(", ");
+        break;
+      case "files":
+        value = (prop.files ?? []).map((f) => f.name).filter(Boolean).join(", ");
+        break;
+      case "formula":
+        value = String(prop.formula?.string ?? prop.formula?.number ?? "");
+        break;
       default:
         break;
     }
