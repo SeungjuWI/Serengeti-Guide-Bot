@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/app.js",
     "index": "node scripts/build-index.js",
-    "stats": "node scripts/stats.js"
+    "stats": "node scripts/stats.js",
+    "audit": "node scripts/audit-index.js"
   },
   "engines": {
     "node": ">=18"

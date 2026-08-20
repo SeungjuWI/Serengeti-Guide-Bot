@@ -21,6 +21,24 @@ const EXCLUDED_PAGE_IDS = new Set(
     .filter(Boolean)
 );
 
+// 인덱싱에서 통째로 제외할 데이터베이스. 예약·대여 기록처럼 행마다 날짜만 남는 로그성 DB는
+// 검색 근거가 되지 못하면서 인덱스를 가득 채워 실제 가이드 문서를 밀어낸다.
+// NOTION_EXCLUDED_DATABASE_IDS 환경변수(쉼표 구분)로 추가 가능.
+const EXCLUDED_DATABASE_IDS = new Set(
+  [
+    "5a0e0fc452ed4833ac31bb2a9b76da65", // 동대문 강의장(사바나) 이용현황 — 예약 기록 612행
+    "2ddbe2a69ead4c6981535c3260aaf841", // 16F 스튜디오 장비 예약 — 대여 기록 341행
+    ...(process.env.NOTION_EXCLUDED_DATABASE_IDS ?? "").split(","),
+  ]
+    .map(normalizePageId)
+    .filter(Boolean)
+);
+
+/** 행을 통째로 인덱싱하지 않을 데이터베이스인지 */
+function isExcludedDatabase(id) {
+  return EXCLUDED_DATABASE_IDS.has(normalizePageId(id));
+}
+
 // 봇이 참고하는 루트 페이지 — 이 페이지와 그 아래 모든 하위 페이지(하위 DB의 각 행 포함)만 대상으로 삼는다.
 // NOTION_ROOT_PAGE_ID 환경변수로 교체 가능.
 const ROOT_PAGE_ID = normalizePageId(
@@ -382,6 +400,10 @@ export async function listAllPages({ log = () => {} } = {}) {
     for (const ref of refs) {
       if (ref.type === "page") {
         queue.push({ id: ref.id, page: null });
+        continue;
+      }
+      if (isExcludedDatabase(ref.id)) {
+        log(`로그성 데이터베이스 건너뜀: ${ref.id}`);
         continue;
       }
       try {

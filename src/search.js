@@ -93,6 +93,22 @@ async function loadIndex() {
 }
 
 /**
+ * 캐시된 청크를 그대로 재사용하면 안 되는 경우인지 판단.
+ * 본문 읽기에 실패했던 페이지는 last_edited_time이 그대로여도 다시 읽어야 한다
+ * (실패한 빈 본문이 영구히 재사용되어 검색에서 사라지는 것을 막기 위함).
+ * readOk 표시가 없는 옛 인덱스는 본문이 비어 있을 때(= 속성값밖에 없을 때)만 다시 읽는다.
+ */
+function needsReread(cachedChunks, page) {
+  const first = cachedChunks[0];
+  if (first.readOk === false) return true;
+  if (first.readOk === undefined) {
+    const cachedChars = cachedChunks.reduce((sum, c) => sum + c.content.length, 0);
+    return cachedChars <= (page.propsText?.length ?? 0);
+  }
+  return false;
+}
+
+/**
  * 전체 노션 페이지를 읽어 임베딩 인덱스를 만듦.
  * 이미 인덱스가 있으면 last_edited_time이 바뀐 페이지만 다시 읽는 증분 방식.
  * 인덱스 항목은 페이지가 아니라 청크 단위 (긴 페이지는 여러 항목으로 나뉨).
@@ -116,9 +132,16 @@ export async function buildIndex({ log = () => {} } = {}) {
   const docs = [];
   const toRead = [];
   let reusedPages = 0;
+  let readFailed = 0;
+  let skippedEmpty = 0;
   for (const page of pages) {
     const cachedChunks = prevByPage.get(page.id);
-    if (cachedChunks && cachedChunks[0].lastEdited === page.lastEdited) {
+    if (cachedChunks && cachedChunks[0].lastEdited === page.lastEdited && !needsReread(cachedChunks, page)) {
+      // 이전 인덱스에 남아 있던 빈 페이지도 여기서 걸러낸다 (읽기 경로와 같은 기준)
+      if (cachedChunks.every((c) => !c.content.trim())) {
+        skippedEmpty += 1;
+        continue;
+      }
       docs.push(...cachedChunks);
       reusedPages += 1;
     } else {
@@ -138,12 +161,21 @@ export async function buildIndex({ log = () => {} } = {}) {
       while (queue.length > 0) {
         const page = queue.shift();
         let content = "";
+        let readOk = true;
         try {
           content = await readPageContent(page.id, { followChildPages: false, maxChars: MAX_INDEX_CHARS });
         } catch (err) {
+          readOk = false;
+          readFailed += 1;
           log(`본문 읽기 실패, 제목만 인덱싱: ${page.title} — ${err.message}`);
         }
         const full = [page.propsText, content].filter(Boolean).join("\n");
+        // 제목뿐인 페이지(첨부 사진 등)는 답변 근거가 못 되면서 검색 상위 자리만 차지하므로 인덱싱하지 않음
+        if (readOk && !full.trim()) {
+          skippedEmpty += 1;
+          done += 1;
+          continue;
+        }
         splitIntoChunks(full).forEach((chunkText, i) => {
           newDocs.push({
             id: page.id,
@@ -151,6 +183,8 @@ export async function buildIndex({ log = () => {} } = {}) {
             title: page.title,
             url: page.url,
             lastEdited: page.lastEdited,
+            // 읽기에 실패한 페이지는 다음 구축 때 본문을 다시 읽도록 표시 (실패한 빈 본문이 굳는 것 방지)
+            readOk,
             content: chunkText,
           });
         });
@@ -175,7 +209,10 @@ export async function buildIndex({ log = () => {} } = {}) {
   await writeFile(INDEX_FILE, JSON.stringify({ version: INDEX_VERSION, builtAt: new Date().toISOString(), docs }));
   cache = null;
 
-  return { pages: pages.length, chunks: docs.length, updated: toRead.length, reused: reusedPages, removed };
+  if (skippedEmpty > 0) log(`내용이 없어 인덱싱하지 않은 페이지 ${skippedEmpty}개`);
+  if (readFailed > 0) log(`본문 읽기 실패 ${readFailed}개 — 다음 구축 때 자동으로 다시 시도해요`);
+
+  return { pages: pages.length, chunks: docs.length, updated: toRead.length, reused: reusedPages, removed, readFailed };
 }
 
 /**
