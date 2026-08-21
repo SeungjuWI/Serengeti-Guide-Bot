@@ -2,6 +2,24 @@ import { Client } from "@notionhq/client";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
+// 노션 2025-09-03 API부터 데이터베이스 하나가 여러 데이터소스를 가질 수 있는데,
+// SDK가 기본으로 쓰는 2022-06-28 버전으로는 그런 DB를 조회하면 400으로 거절당한다.
+// 그러면 그 DB의 행 전체가 인덱스에서 통째로 빠지므로, 그 경우에만 새 버전으로 다시 조회한다.
+const DATA_SOURCE_API_VERSION = "2025-09-03";
+const notionDS = new Client({
+  auth: process.env.NOTION_API_KEY,
+  notionVersion: DATA_SOURCE_API_VERSION,
+});
+
+/** 여러 데이터소스를 가진 DB라서 구버전 API가 거절한 경우인지 */
+function isMultiDataSourceError(err) {
+  const body = typeof err?.body === "string" ? err.body : "";
+  return (
+    body.includes("multiple_data_sources_for_database") ||
+    /multiple data sources/i.test(err?.message ?? "")
+  );
+}
+
 const MAX_PAGES = 4; // 답변 컨텍스트에 넣을 최대 페이지 수
 const MAX_CHARS_PER_PAGE = 4000; // 페이지당 최대 글자 수 (토큰 비용 제어)
 const MAX_BLOCK_DEPTH = 5; // 중첩 블록(토글 등) 탐색 깊이
@@ -297,9 +315,15 @@ export async function searchNotionPages(keywords) {
   return results;
 }
 
+/** DB 행 페이지인지 (새 API 버전에서는 부모가 data_source_id로 온다) */
+function isDatabaseRow(page) {
+  const type = page.parent?.type;
+  return type === "database_id" || type === "data_source_id";
+}
+
 /** DB 행 페이지의 속성값들을 텍스트로 변환 (제목 속성 제외) */
 function getPagePropsText(page) {
-  if (page.parent?.type !== "database_id") return "";
+  if (!isDatabaseRow(page)) return "";
 
   const lines = [];
   for (const [name, prop] of Object.entries(page.properties ?? {})) {
@@ -378,18 +402,56 @@ async function listChildRefs(pageId) {
   return refs;
 }
 
-/** 데이터베이스의 모든 행(= 페이지)을 가져옴 */
+/** 데이터베이스의 모든 행(= 페이지)을 가져옴 (다중 데이터소스 DB는 새 API 버전으로 폴백) */
 async function listDatabaseRows(databaseId) {
   const rows = [];
   let cursor;
-  do {
-    const res = await withRetry(() =>
-      notion.databases.query({ database_id: databaseId, page_size: 100, start_cursor: cursor })
-    );
-    rows.push(...res.results);
-    cursor = res.has_more ? res.next_cursor : undefined;
-  } while (cursor);
+  try {
+    do {
+      const res = await withRetry(() =>
+        notion.databases.query({ database_id: databaseId, page_size: 100, start_cursor: cursor })
+      );
+      rows.push(...res.results);
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+  } catch (err) {
+    if (!isMultiDataSourceError(err)) throw err;
+    return listDataSourceRows(databaseId);
+  }
   return rows;
+}
+
+/** 다중 데이터소스 DB: 데이터소스 목록을 받아 각각의 행을 모두 가져옴 */
+async function listDataSourceRows(databaseId) {
+  const db = await withRetry(() =>
+    notionDS.request({ path: `databases/${databaseId}`, method: "get" })
+  );
+  const rows = [];
+  for (const dataSource of db.data_sources ?? []) {
+    let cursor;
+    do {
+      const res = await withRetry(() =>
+        notionDS.request({
+          path: `data_sources/${dataSource.id}/query`,
+          method: "post",
+          body: { page_size: 100, start_cursor: cursor },
+        })
+      );
+      rows.push(...res.results);
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+  }
+  return rows;
+}
+
+/** 데이터베이스 메타 조회 (다중 데이터소스 DB는 새 API 버전으로 폴백) */
+async function retrieveDatabase(databaseId) {
+  try {
+    return await withRetry(() => notion.databases.retrieve({ database_id: databaseId }));
+  } catch (err) {
+    if (!isMultiDataSourceError(err)) throw err;
+    return withRetry(() => notionDS.request({ path: `databases/${databaseId}`, method: "get" }));
+  }
 }
 
 /**
@@ -398,7 +460,7 @@ async function listDatabaseRows(databaseId) {
  * 제외 페이지는 목록에 넣지 않되, 그 아래 하위 페이지는 계속 따라간다.
  * @returns {Promise<Array<{id: string, title: string, url: string, lastEdited: string, propsText: string}>>}
  */
-export async function listAllPages({ log = () => {} } = {}) {
+export async function listAllPages({ log = () => {}, onError = () => {} } = {}) {
   const pages = [];
   const visited = new Set();
   const queue = [{ id: ROOT_PAGE_ID, page: null }];
@@ -415,6 +477,7 @@ export async function listAllPages({ log = () => {} } = {}) {
         page = await withRetry(() => notion.pages.retrieve({ page_id: id }));
       } catch (err) {
         log(`페이지 정보 읽기 실패 (${id}): ${err.message}`);
+        onError("page", id, err);
         continue;
       }
     }
@@ -433,7 +496,9 @@ export async function listAllPages({ log = () => {} } = {}) {
     try {
       refs = await listChildRefs(page.id);
     } catch (err) {
+      // 여기서 실패하면 그 아래 하위 문서가 통째로 인덱스에서 빠진다 — 반드시 눈에 띄게 남긴다
       log(`하위 항목 읽기 실패 (${page.id}): ${err.message}`);
+      onError("children", page.id, err);
     }
     for (const ref of refs) {
       if (ref.type === "page") {
@@ -448,6 +513,7 @@ export async function listAllPages({ log = () => {} } = {}) {
         for (const row of await listDatabaseRows(ref.id)) queue.push({ id: row.id, page: row });
       } catch (err) {
         log(`데이터베이스 읽기 실패 (${ref.id}): ${err.message}`);
+        onError("database", ref.id, err);
       }
     }
   }
@@ -477,13 +543,15 @@ async function isUnderRoot(page) {
 
     const parent = node.parent;
     if (!parent || parent.type === "workspace") break;
+    // 다중 데이터소스 DB의 행은 부모가 data_source_id지만 같은 객체에 database_id도 들어 있다
+    const isDbParent = parent.type === "database_id" || parent.type === "data_source_id";
     const parentId = parent.page_id ?? parent.database_id ?? parent.block_id;
     if (!parentId) break;
     if (normalizePageId(parentId) === ROOT_PAGE_ID) return remember(true);
 
     try {
-      if (parent.type === "database_id") {
-        node = await withRetry(() => notion.databases.retrieve({ database_id: parentId }));
+      if (isDbParent) {
+        node = await retrieveDatabase(parentId);
       } else if (parent.type === "block_id") {
         node = await withRetry(() => notion.blocks.retrieve({ block_id: parentId }));
       } else {

@@ -126,8 +126,12 @@ export async function buildIndex({ log = () => {} } = {}) {
   }
 
   log("노션 루트 페이지에서 하위 페이지를 따라가며 목록을 만드는 중...");
-  const pages = await listAllPages({ log });
+  const treeErrors = [];
+  const pages = await listAllPages({ log, onError: (kind, id, err) => treeErrors.push({ kind, id, message: err.message }) });
   log(`페이지 ${pages.length}개 발견`);
+  if (treeErrors.length > 0) {
+    log(`⚠️ 순회 중 ${treeErrors.length}건 실패 — 그 아래 문서가 인덱스에서 빠졌을 수 있어요`);
+  }
 
   const docs = [];
   const toRead = [];
@@ -212,7 +216,15 @@ export async function buildIndex({ log = () => {} } = {}) {
   if (skippedEmpty > 0) log(`내용이 없어 인덱싱하지 않은 페이지 ${skippedEmpty}개`);
   if (readFailed > 0) log(`본문 읽기 실패 ${readFailed}개 — 다음 구축 때 자동으로 다시 시도해요`);
 
-  return { pages: pages.length, chunks: docs.length, updated: toRead.length, reused: reusedPages, removed, readFailed };
+  return {
+    pages: pages.length,
+    chunks: docs.length,
+    updated: toRead.length,
+    reused: reusedPages,
+    removed,
+    readFailed,
+    treeErrors: treeErrors.length,
+  };
 }
 
 /**
