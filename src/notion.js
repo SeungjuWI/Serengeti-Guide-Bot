@@ -67,7 +67,35 @@ async function throttle() {
   if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
 }
 
-/** 노션 API 호출 재시도 (요청 제한 429는 노션이 알려주는 시간만큼 대기, 일시적 서버 오류는 지수 백오프) */
+// 응답을 받기도 전에 끊긴 연결 — 노션이 준 상태 코드가 없어서 status로는 걸러지지 않는다
+const NETWORK_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+  "EPIPE",
+  "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "notionhq_client_request_timeout",
+  "notionhq_client_response_error",
+]);
+
+/** 오류 객체 어딘가에 네트워크 순단 흔적이 있는지 (fetch는 원인을 cause에 감춰둔다) */
+function isNetworkError(err) {
+  for (let e = err, depth = 0; e && depth < 3; e = e.cause, depth += 1) {
+    if (NETWORK_ERROR_CODES.has(e.code)) return true;
+    if (typeof e.message === "string" && /ECONNRESET|ENOTFOUND|ETIMEDOUT|socket hang up|fetch failed/i.test(e.message)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 노션 API 호출 재시도.
+ * 요청 제한 429는 노션이 알려주는 시간만큼 대기하고, 일시적 서버 오류와 네트워크 순단은 지수 백오프로 다시 시도한다.
+ * 네트워크 순단을 재시도하지 않으면 그 페이지가 본문 없이 인덱싱된다.
+ */
 async function withRetry(fn, tries = 6) {
   let lastErr;
   for (let i = 0; i < tries; i++) {
@@ -77,7 +105,7 @@ async function withRetry(fn, tries = 6) {
     } catch (err) {
       lastErr = err;
       const rateLimited = err?.code === "rate_limited" || err?.status === 429;
-      const retryable = rateLimited || err?.status >= 500;
+      const retryable = rateLimited || err?.status >= 500 || isNetworkError(err);
       if (!retryable || i === tries - 1) throw err;
 
       const retryAfterSec = Number(err?.headers?.get?.("retry-after") ?? 0);

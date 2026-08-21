@@ -5,3 +5,35 @@
 인덱스 형식이 바뀌어 전체를 다시 만들어요
 노션 루트 페이지에서 하위 페이지를 따라가며 목록을 만드는 중...
 로그성 데이터베이스 건너뜀: 2ddbe2a6-9ead-4c69-8153-5c3260aaf841
+로그성 데이터베이스 건너뜀: 5a0e0fc4-52ed-4833-ac31-bb2a9b76da65
+페이지 360개 발견
+신규/변경 360개 읽기 시작 (기존 재사용 0개, 삭제됨 0개)
+본문 읽기 실패, 제목만 인덱싱: ‘25년 송년행사 — request to https://api.notion.com/v1/blocks/2cd44860-a4f4-80a7-97cf-ed6d5c120805/children?page_size=100 failed, reason: read ECONNRESET
+본문 읽기 실패, 제목만 인덱싱: ‘25.04 프라이드 미팅 — request to https://api.notion.com/v1/blocks/1e544860-a4f4-8068-a4a2-c6ba4619fe0c/children?page_size=100 failed, reason: write ECONNRESET
+본문 읽기 실패, 제목만 인덱싱: ‘25.07 프라이드 미팅 — request to https://api.notion.com/v1/blocks/24044860-a4f4-80e9-8a4c-ebc11cb046b1/children?page_size=100 failed, reason: getaddrinfo ENOTFOUND api.notion.com
+본문 읽기 실패, 제목만 인덱싱: 구글 캘린더(회의실 예약) 사용 안내 — request to https://api.notion.com/v1/blocks/1f944860-a4f4-8022-bef0-c5947b97331c/children?page_size=100 failed, reason: getaddrinfo ENOTFOUND api.notion.com
+본문 읽기 실패, 제목만 인덱싱: ‘25.01 프라이드 미팅 — request to https://api.notion.com/v1/blocks/18344860-a4f4-805f-8242-dfe2d795748a/children?page_size=100 failed, reason: getaddrinfo ENOTFOUND api.notion.com
+본문 읽기 실패, 제목만 인덱싱: 24.07 프라이드 미팅 — request to https://api.notion.com/v1/blocks/85f3608f-01fd-4a65-b8f8-5e8c8e8d7b3c/children?page_size=100 failed, reason: getaddrinfo ENOTFOUND api.notion.com
+본문 읽기 100/360
+본문 읽기 200/360
+임베딩 30/512 청크
+임베딩 60/512 청크
+임베딩 90/512 청크
+임베딩 120/512 청크
+임베딩 150/512 청크
+임베딩 180/512 청크
+임베딩 210/512 청크
+임베딩 240/512 청크
+임베딩 270/512 청크
+임베딩 300/512 청크
+임베딩 330/512 청크
+임베딩 360/512 청크
+임베딩 390/512 청크
+임베딩 420/512 청크
+임베딩 450/512 청크
+임베딩 480/512 청크
+임베딩 510/512 청크
+임베딩 512/512 청크
+내용이 없어 인덱싱하지 않은 페이지 34개
+본문 읽기 실패 6개 — 다음 구축 때 자동으로 다시 시도해요
+인덱스 구축 완료 — 페이지 360 (청크 512) / 갱신 360 / 재사용 0 / 삭제 0 / 읽기실패 6

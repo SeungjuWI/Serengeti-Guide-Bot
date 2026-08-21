@@ -3,3 +3,6 @@ node_modules/
 data/
 .DS_Store
 npm-debug.log*
+
+# 일회성 점검 스크립트/로그
+_*
