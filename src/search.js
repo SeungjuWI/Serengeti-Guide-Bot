@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listAllPages, readPageContent, isExcludedPage } from "./notion.js";
+import { isPinnedPage } from "./pinned.js";
 import { embedTexts } from "./llm.js";
 
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
@@ -11,6 +12,8 @@ const INDEX_VERSION = 6; // 인덱스 형식이 바뀌면 올림 → 이전 인�
 const MAX_RESULTS = 4; // 답변 컨텍스트에 넣을 최대 페이지 수
 const MAX_CHUNKS_PER_PAGE = 2; // 페이지당 답변에 넣을 최대 청크 수
 const MIN_SCORE = 0.2; // 이보다 관련도가 낮은 청크는 버림
+const PINNED_MIN_SCORE = 0.05; // 주제가 특정 문서에 고정된 경우의 하한 (후보가 그 문서뿐이라 낮게)
+const PINNED_MAX_CHUNKS_PER_PAGE = 4; // 고정 문서는 규정 전체를 봐야 하므로 청크를 더 넣음
 const EMBED_BATCH = 30; // 임베딩 API 한 번에 보낼 청크 수
 const READ_CONCURRENCY = 3; // 노션 본문 읽기 동시 실행 수 (API 요청 제한 고려)
 const MAX_INDEX_CHARS = 20000; // 인덱싱 시 페이지당 읽을 최대 글자 수
@@ -234,9 +237,10 @@ export async function buildIndex({ log = () => {} } = {}) {
  * keywords(LLM이 추출한 검색어)가 본문에 실제 등장하면 가점을 줘서 정확한 용어 질문을 보강.
  * 본문은 인덱스에 저장된 것을 사용 — 노션 변경사항은 다음 인덱스 갱신 때 반영됨.
  * 인덱스가 아직 없으면 null 반환 (호출부에서 키워드 검색으로 폴백).
+ * pinnedPageIds를 주면 그 페이지 안에서만 찾는다 (경조사처럼 지정 문서로만 답해야 하는 주제).
  * @returns {Promise<Array<{title: string, url: string, content: string}> | null>}
  */
-export async function searchIndex(query, keywords = []) {
+export async function searchIndex(query, keywords = [], { pinnedPageIds = null } = {}) {
   let index;
   try {
     index = await loadIndex();
@@ -251,6 +255,8 @@ export async function searchIndex(query, keywords = []) {
   const scored = index.docs
     // 제외 페이지는 인덱스에 남아 있어도 답변 근거로 쓰지 않음 (다음 인덱스 갱신 때 사라짐)
     .filter((doc) => !isExcludedPage(doc.id))
+    // 주제가 특정 문서에 고정돼 있으면 그 문서 밖은 아예 후보에서 뺀다
+    .filter((doc) => !pinnedPageIds || isPinnedPage(pinnedPageIds, doc.id))
     .map((doc) => {
       let score = similarity(queryVec, doc.embedding);
       // 검색어가 제목/본문에 실제로 등장하면 가점 (의미는 비슷한데 엉뚱한 문서가 이기는 것 방지)
@@ -266,16 +272,19 @@ export async function searchIndex(query, keywords = []) {
     .sort((a, b) => b.score - a.score);
 
   // 상위 청크부터 페이지 단위로 묶음: 최대 4개 페이지, 페이지당 최대 2개 청크
+  // 고정 문서는 후보가 그 문서뿐이라 관련도 하한을 낮추고 청크를 더 넣는다 (규정 전체를 보게)
+  const minScore = pinnedPageIds ? PINNED_MIN_SCORE : MIN_SCORE;
+  const maxChunks = pinnedPageIds ? PINNED_MAX_CHUNKS_PER_PAGE : MAX_CHUNKS_PER_PAGE;
   const byPage = new Map();
   for (const { doc, score } of scored) {
-    if (score < MIN_SCORE) break;
+    if (score < minScore) break;
     let entry = byPage.get(doc.id);
     if (!entry) {
       if (byPage.size >= MAX_RESULTS) continue;
       entry = { title: doc.title, url: doc.url, team: doc.team ?? null, score, chunks: [] }; // score = 그 페이지 최고 청크 점수
       byPage.set(doc.id, entry);
     }
-    if (entry.chunks.length < MAX_CHUNKS_PER_PAGE) entry.chunks.push(doc);
+    if (entry.chunks.length < maxChunks) entry.chunks.push(doc);
   }
 
   return [...byPage.values()].map((entry) => ({
