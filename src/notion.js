@@ -634,7 +634,7 @@ export async function listAllPages({ log = () => {}, onError = () => {} } = {}) 
     }
   }
 
-  if (linkedPages > 0) log(`링크를 따라가 추가로 찾은 문서 ${linkedPages}개 (링크 깊이 최대 ${MAX_LINK_DEPTH})`);
+  if (linkedPages > 0) log(`링크를 통해 먼저 도달한 문서 ${linkedPages}개 (링크 깊이 최대 ${MAX_LINK_DEPTH}) — 하위 트리로도 닿는 문서가 섞여 있을 수 있어요`);
   if (pages.length >= MAX_TREE_PAGES) log(`⚠️ 순회 상한 ${MAX_TREE_PAGES}개에 도달해 멈췄어요`);
 
   // 루트 하위 판별을 굳이 다시 계산하지 않도록 순회 결과를 재사용
