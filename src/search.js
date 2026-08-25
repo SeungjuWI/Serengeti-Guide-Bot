@@ -7,7 +7,7 @@ import { embedTexts } from "./llm.js";
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 const INDEX_FILE = path.join(DATA_DIR, "index.json");
 
-const INDEX_VERSION = 5; // 인덱스 형식이 바뀌면 올림 → 이전 인덱스는 버리고 전체 재구축
+const INDEX_VERSION = 6; // 인덱스 형식이 바뀌면 올림 → 이전 인덱스는 버리고 전체 재구축
 const MAX_RESULTS = 4; // 답변 컨텍스트에 넣을 최대 페이지 수
 const MAX_CHUNKS_PER_PAGE = 2; // 페이지당 답변에 넣을 최대 청크 수
 const MIN_SCORE = 0.2; // 이보다 관련도가 낮은 청크는 버림
@@ -187,6 +187,8 @@ export async function buildIndex({ log = () => {} } = {}) {
             title: page.title,
             url: page.url,
             lastEdited: page.lastEdited,
+            // 문의 안내를 이 문서의 소관 팀으로 하기 위해 함께 저장 (HR/GA/FA)
+            team: page.team ?? null,
             // 읽기에 실패한 페이지는 다음 구축 때 본문을 다시 읽도록 표시 (실패한 빈 본문이 굳는 것 방지)
             readOk,
             content: chunkText,
@@ -270,7 +272,7 @@ export async function searchIndex(query, keywords = []) {
     let entry = byPage.get(doc.id);
     if (!entry) {
       if (byPage.size >= MAX_RESULTS) continue;
-      entry = { title: doc.title, url: doc.url, score, chunks: [] }; // score = 그 페이지 최고 청크 점수
+      entry = { title: doc.title, url: doc.url, team: doc.team ?? null, score, chunks: [] }; // score = 그 페이지 최고 청크 점수
       byPage.set(doc.id, entry);
     }
     if (entry.chunks.length < MAX_CHUNKS_PER_PAGE) entry.chunks.push(doc);
@@ -279,6 +281,7 @@ export async function searchIndex(query, keywords = []) {
   return [...byPage.values()].map((entry) => ({
     title: entry.title,
     url: entry.url,
+    team: entry.team,
     score: Math.round(entry.score * 1000) / 1000,
     content: entry.chunks
       .sort((a, b) => (a.chunk ?? 0) - (b.chunk ?? 0))

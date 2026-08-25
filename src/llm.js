@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { TEAMS, describeTeam } from "./teams.js";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -73,13 +74,19 @@ const SYSTEM_PROMPT = `너는 '세렝게티 가이드봇'이다. 사내 노션 �
 - 이전 대화가 주어지면 현재 질문을 그 맥락에서 해석해 이어지는 답변을 한다.
 - 답변에 사용한 문서의 노션 링크를 답변 끝에 "📎 참고 문서" 항목으로 붙인다.
 
-[문서를 찾지 못했거나 문서로 답할 수 없는 경우]
-- 솔직하게 "관련 내용을 노션에서 찾지 못했어요"라고 말한 뒤, 질문 주제에 맞는 담당팀 문의 방법을 안내한다:
-  - 인사규정/복리후생 관련(멋쟁이사자처럼 인사규정, 멋쟁이사자처럼 복리후생) → HR팀: Slack #co_operations 채널에서 @hr_team 태그
-  - 근무환경/계약/자산관리 관련(멋쟁이사자처럼 근무환경, 멋쟁이사자처럼 계약, 멋쟁이사자처럼 자산관리) → GA팀: Slack #co_operations 채널에서 @ga_team 태그
-  - 재무/회계 관련(멋쟁이사자처럼 재무회계 가이드 - 법인카드, 경비 정산, 세금계산서, 예산 등) → FA팀: Slack #co_operations 채널에서 @fa_team 태그
-  - 아이디어 제안/건의/불편사항 → 대나무숲: Slack #co_operations 채널에서 @likelion_bamboo 태그
+[담당팀 안내 — 문의처를 알려줄 때]
+- 문서를 찾았든 못 찾았든, 문의처를 안내할 때는 아래 순서로 담당팀을 정한다.
+  1) 근거 문서에 "담당팀:" 줄이 있으면 그 팀을 그대로 쓴다. 이게 가장 우선이다.
+  2) 담당팀 표시가 없으면 질문 주제로 판단한다:
+     - 인사규정/복리후생 → ${describeTeam("hr")}
+     - 근무환경/계약/자산관리 → ${describeTeam("ga")}
+     - 재무/회계(${TEAMS.fa.scope}) → ${describeTeam("fa")}
+     - 아이디어 제안/건의/불편사항 → ${describeTeam("bamboo")}
+- 문서 본문에 일부 팀 태그(@hr_team, @ga_team 등)만 적혀 있더라도, 위 기준으로 정한 담당팀을 우선해 안내한다. 재무·회계 문의를 HR팀이나 GA팀으로 보내지 않는다.
 - 담당팀을 지칭할 때는 반드시 위 명칭(HR팀, GA팀, FA팀, 대나무숲)을 그대로 쓴다. "인사팀", "총무팀", "재무팀" 등 다른 이름으로 바꿔 부르지 않으며, 문의 문안의 인사말에도 같은 명칭을 쓴다.
+
+[문서를 찾지 못했거나 문서로 답할 수 없는 경우]
+- 솔직하게 "관련 내용을 노션에서 찾지 못했어요"라고 말한 뒤, 위 기준의 담당팀 문의 방법을 안내한다.
 - 이어서 바로 복사해 쓸 수 있는 문의 문안을 "✍️ 문의 예시" 항목으로 만들어준다. 문안은 정중하고 간결하게, 질문 내용이 구체적으로 담기게 작성한다.
 
 [톤앤매너]
@@ -95,7 +102,7 @@ const SYSTEM_PROMPT = `너는 '세렝게티 가이드봇'이다. 사내 노션 �
 /**
  * 노션 문서들을 근거로 답변 생성.
  * @param {string} question
- * @param {Array<{title: string, url: string, content: string}>} docs
+ * @param {Array<{title: string, url: string, content: string, team?: string}>} docs
  * @param {string} history 이전 대화 내용 (없으면 빈 문자열)
  */
 export async function generateAnswer(question, docs, history = "") {
@@ -104,7 +111,14 @@ export async function generateAnswer(question, docs, history = "") {
       ? docs
           .map(
             (d, i) =>
-              `[문서 ${i + 1}] ${d.title}\nURL: ${d.url}\n내용:\n${d.content || "(본문 없음)"}`
+              [
+                `[문서 ${i + 1}] ${d.title}`,
+                `URL: ${d.url}`,
+                d.team ? `담당팀: ${describeTeam(d.team)}` : null,
+                `내용:\n${d.content || "(본문 없음)"}`,
+              ]
+                .filter(Boolean)
+                .join("\n")
           )
           .join("\n\n---\n\n")
       : "(검색된 문서 없음)";

@@ -1,4 +1,5 @@
 import { Client } from "@notionhq/client";
+import { teamForContainer } from "./teams.js";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
@@ -26,6 +27,11 @@ const MAX_BLOCK_DEPTH = 5; // 중첩 블록(토글 등) 탐색 깊이
 // 컬럼 같은 레이아웃 블록은 내용 중첩이 아니므로 깊이 계산에서 제외
 const LAYOUT_BLOCK_TYPES = new Set(["column_list", "column", "synced_block"]);
 const MAX_CHILD_PAGE_DEPTH = 2; // 하위 페이지 탐색 깊이 (페이지 안의 페이지)
+
+// 본문에 걸린 링크(페이지 링크 블록·멘션·텍스트 링크)를 몇 단계까지 따라가 인덱싱할지.
+// 하위 페이지(child_page)는 깊이 제한 없이 모두 따라가고, 이 값은 "링크로 건너뛴" 횟수만 센다.
+// 0이면 링크는 따라가지 않고 예전처럼 하위 트리만 인덱싱한다.
+const MAX_LINK_DEPTH = Math.max(0, Number(process.env.NOTION_LINK_FOLLOW_DEPTH ?? 2));
 
 // 검색·인덱싱에서 제외할 페이지. 해당 페이지 본문만 제외되고, 하위 페이지는 각각 별도로 인덱싱된다.
 // NOTION_EXCLUDED_PAGE_IDS 환경변수(쉼표 구분)로 추가 가능.
@@ -306,6 +312,7 @@ export async function searchNotionPages(keywords) {
         title: getPageTitle(page),
         url: page.url,
         content,
+        team: await resolveTeamForPage(page),
       });
     } catch (err) {
       console.error(`페이지 본문 읽기 실패 (${page.id}):`, err.message);
@@ -373,15 +380,67 @@ function getPagePropsText(page) {
   return lines.join("\n");
 }
 
+// 노션 URL/경로에서 페이지·DB ID(32자리 16진수)를 뽑아냄
+const NOTION_ID_RE = /([0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12})/i;
+const NOTION_HOST_RE = new RegExp("^https?://[^/]*(notion[.]so|notion[.]site|notion[.]com)/", "i");
+
+/** 링크 주소가 같은 워크스페이스의 노션 문서를 가리키면 그 ID를 반환 (외부 링크는 null) */
+function notionIdFromHref(href) {
+  if (!href) return null;
+  if (!href.startsWith("/") && !NOTION_HOST_RE.test(href)) return null;
+  // 쿼리스트링과 앵커(#...)를 떼고 경로에서만 찾는다 — 앵커는 페이지가 아니라 블록 ID다
+  const path = href.split("?")[0].split("#")[0];
+  const match = NOTION_ID_RE.exec(path);
+  return match ? normalizePageId(match[1]) : null;
+}
+
+/** rich_text 안의 멘션·링크가 가리키는 노션 문서 ID들을 모음 */
+function refsFromRichText(richText) {
+  const refs = [];
+  for (const token of richText ?? []) {
+    const mention = token.type === "mention" ? token.mention : null;
+    if (mention?.type === "page" && mention.page?.id) refs.push({ type: "page", id: mention.page.id });
+    else if (mention?.type === "database" && mention.database?.id) refs.push({ type: "database", id: mention.database.id });
+    const linked = notionIdFromHref(token.href ?? token.text?.link?.url);
+    if (linked) refs.push({ type: "unknown", id: linked });
+  }
+  return refs;
+}
+
+/** 블록 하나가 가리키는 다른 노션 문서들 (페이지 링크 블록, 멘션, 본문 링크, 북마크/임베드) */
+function linkRefsFromBlock(block) {
+  const refs = [];
+  const data = block[block.type] ?? {};
+
+  if (block.type === "link_to_page") {
+    if (data.page_id) refs.push({ type: "page", id: data.page_id });
+    else if (data.database_id) refs.push({ type: "database", id: data.database_id });
+  }
+  if (block.type === "bookmark" || block.type === "embed" || block.type === "link_preview") {
+    const linked = notionIdFromHref(data.url);
+    if (linked) refs.push({ type: "unknown", id: linked });
+  }
+  refs.push(...refsFromRichText(data.rich_text));
+  refs.push(...refsFromRichText(data.caption));
+  if (block.type === "table_row") {
+    for (const cell of data.cells ?? []) refs.push(...refsFromRichText(cell));
+  }
+  return refs;
+}
+
 /**
- * 페이지 하나가 직접 품고 있는 하위 페이지·하위 DB를 찾음.
+ * 페이지 하나가 직접 품고 있는 하위 페이지·하위 DB와, 본문에서 링크로 가리키는 다른 문서를 찾음.
  * 토글·컬럼 등 중첩 블록 안까지 살피되, 하위 페이지 안으로는 들어가지 않는다 (순회는 호출부가 담당).
+ * ref.via는 "child"(품고 있음) 또는 "link"(링크로 가리킴) — 호출부가 링크 깊이를 셀 때 쓴다.
  */
 async function listChildRefs(pageId) {
   const refs = [];
   const stack = [pageId];
+  const seenBlocks = new Set(); // 동기화 블록 등으로 같은 블록을 두 번 훑지 않도록
   while (stack.length > 0) {
     const blockId = stack.pop();
+    if (seenBlocks.has(blockId)) continue;
+    seenBlocks.add(blockId);
     let cursor;
     do {
       const res = await withRetry(() =>
@@ -389,11 +448,14 @@ async function listChildRefs(pageId) {
       );
       for (const block of res.results) {
         if (block.type === "child_page") {
-          refs.push({ type: "page", id: block.id });
+          refs.push({ type: "page", id: block.id, via: "child" });
         } else if (block.type === "child_database") {
-          refs.push({ type: "database", id: block.id });
-        } else if (block.has_children) {
-          stack.push(block.id);
+          refs.push({ type: "database", id: block.id, via: "child" });
+        } else {
+          if (MAX_LINK_DEPTH > 0) {
+            for (const link of linkRefsFromBlock(block)) refs.push({ ...link, via: "link" });
+          }
+          if (block.has_children) stack.push(block.id);
         }
       }
       cursor = res.has_more ? res.next_cursor : undefined;
@@ -454,19 +516,40 @@ async function retrieveDatabase(databaseId) {
   }
 }
 
+/** 링크가 가리키는 대상이 페이지인지 DB인지 확인 (본문 링크는 종류가 적혀 있지 않다) */
+async function classifyRef(id) {
+  try {
+    return { kind: "page", page: await withRetry(() => notion.pages.retrieve({ page_id: id })) };
+  } catch (err) {
+    // 권한이 없거나 삭제된 문서는 여기서 조용히 걸러진다
+    if (err?.status && err.status !== 400 && err.status !== 404) throw err;
+  }
+  try {
+    await retrieveDatabase(id);
+    return { kind: "database", page: null };
+  } catch {
+    return { kind: null, page: null };
+  }
+}
+
 /**
  * 루트 페이지에서 시작해 하위 페이지를 모두 따라 들어가며 메타데이터를 모음 (검색 인덱스 구축용).
  * 하위 DB는 각 행이 하나의 페이지로 포함된다.
+ * 본문에 걸린 링크(페이지 링크 블록·멘션·텍스트 링크)도 MAX_LINK_DEPTH 단계까지 따라가므로,
+ * 루트 트리 밖에 있지만 가이드에서 링크로 안내하는 문서도 검색 대상이 된다.
  * 제외 페이지는 목록에 넣지 않되, 그 아래 하위 페이지는 계속 따라간다.
- * @returns {Promise<Array<{id: string, title: string, url: string, lastEdited: string, propsText: string}>>}
+ * 각 페이지에는 소관 팀(team)이 함께 붙는다 — 상위 DB/페이지의 담당팀을 물려받는다.
+ * @returns {Promise<Array<{id: string, title: string, url: string, lastEdited: string, propsText: string, team: string|null}>>}
  */
 export async function listAllPages({ log = () => {}, onError = () => {} } = {}) {
   const pages = [];
   const visited = new Set();
-  const queue = [{ id: ROOT_PAGE_ID, page: null }];
+  const enqueued = new Set([ROOT_PAGE_ID]);
+  const queue = [{ id: ROOT_PAGE_ID, page: null, team: null, linkDepth: 0 }];
+  let linkedPages = 0;
 
   while (queue.length > 0 && pages.length < MAX_TREE_PAGES) {
-    const { id, page: known } = queue.shift();
+    const { id, page: known, team: inheritedTeam, linkDepth } = queue.shift();
     const key = normalizePageId(id);
     if (visited.has(key)) continue;
     visited.add(key);
@@ -476,11 +559,19 @@ export async function listAllPages({ log = () => {}, onError = () => {} } = {}) 
       try {
         page = await withRetry(() => notion.pages.retrieve({ page_id: id }));
       } catch (err) {
+        // 링크로 발견한 문서는 통합에 연결돼 있지 않을 수 있다 — 원래 트리에서 빠진 게 아니므로 경고로 세지 않는다
+        if (linkDepth > 0) {
+          log(`링크 대상 건너뜀 (통합 미연결 등): ${id}`);
+          continue;
+        }
         log(`페이지 정보 읽기 실패 (${id}): ${err.message}`);
         onError("page", id, err);
         continue;
       }
     }
+
+    // 이 페이지 자체가 팀 소관 컨테이너면 그 팀, 아니면 상위에서 물려받은 팀
+    const team = teamForContainer(page.id) ?? inheritedTeam;
 
     if (!isExcludedPage(page.id)) {
       pages.push({
@@ -489,7 +580,9 @@ export async function listAllPages({ log = () => {}, onError = () => {} } = {}) 
         url: page.url,
         lastEdited: page.last_edited_time,
         propsText: getPagePropsText(page),
+        team,
       });
+      if (linkDepth > 0) linkedPages += 1;
     }
 
     let refs = [];
@@ -500,17 +593,40 @@ export async function listAllPages({ log = () => {}, onError = () => {} } = {}) 
       log(`하위 항목 읽기 실패 (${page.id}): ${err.message}`);
       onError("children", page.id, err);
     }
+
     for (const ref of refs) {
-      if (ref.type === "page") {
-        queue.push({ id: ref.id, page: null });
+      const nextDepth = ref.via === "link" ? linkDepth + 1 : linkDepth;
+      if (nextDepth > MAX_LINK_DEPTH) continue;
+      const refKey = normalizePageId(ref.id);
+      if (!refKey || visited.has(refKey) || enqueued.has(refKey)) continue;
+      const refTeam = teamForContainer(ref.id) ?? team;
+
+      let kind = ref.type;
+      let refPage = null;
+      if (kind === "unknown") {
+        try {
+          ({ kind, page: refPage } = await classifyRef(ref.id));
+        } catch (err) {
+          log(`링크 대상 확인 실패 (${ref.id}): ${err.message}`);
+          continue;
+        }
+        if (!kind) continue; // 권한 없음·삭제됨·외부 문서
+      }
+
+      if (kind === "page") {
+        enqueued.add(refKey);
+        queue.push({ id: ref.id, page: refPage, team: refTeam, linkDepth: nextDepth });
         continue;
       }
       if (isExcludedDatabase(ref.id)) {
         log(`로그성 데이터베이스 건너뜀: ${ref.id}`);
         continue;
       }
+      enqueued.add(refKey);
       try {
-        for (const row of await listDatabaseRows(ref.id)) queue.push({ id: row.id, page: row });
+        for (const row of await listDatabaseRows(ref.id)) {
+          queue.push({ id: row.id, page: row, team: refTeam, linkDepth: nextDepth });
+        }
       } catch (err) {
         log(`데이터베이스 읽기 실패 (${ref.id}): ${err.message}`);
         onError("database", ref.id, err);
@@ -518,9 +634,52 @@ export async function listAllPages({ log = () => {}, onError = () => {} } = {}) 
     }
   }
 
+  if (linkedPages > 0) log(`링크를 따라가 추가로 찾은 문서 ${linkedPages}개 (링크 깊이 최대 ${MAX_LINK_DEPTH})`);
+  if (pages.length >= MAX_TREE_PAGES) log(`⚠️ 순회 상한 ${MAX_TREE_PAGES}개에 도달해 멈췄어요`);
+
   // 루트 하위 판별을 굳이 다시 계산하지 않도록 순회 결과를 재사용
   for (const key of visited) ancestryCache.set(key, true);
   return pages;
+}
+
+const teamCache = new Map(); // 정규화된 페이지 ID → 담당팀 키 (null 포함)
+
+/**
+ * 이 페이지가 어느 팀 소관인지 부모를 거슬러 올라가며 찾음.
+ * 인덱스에는 순회할 때 팀이 함께 저장되므로, 이 경로는 인덱스 없이 키워드 검색할 때만 쓰인다.
+ */
+export async function resolveTeamForPage(page) {
+  const chain = [];
+  const remember = (result) => {
+    for (const key of chain) teamCache.set(key, result);
+    return result;
+  };
+
+  let node = page;
+  for (let hop = 0; hop < MAX_ANCESTOR_HOPS && node; hop++) {
+    const key = normalizePageId(node.id);
+    const direct = teamForContainer(key);
+    if (direct) return remember(direct);
+    if (teamCache.has(key)) return remember(teamCache.get(key));
+    chain.push(key);
+
+    const parent = node.parent;
+    if (!parent || parent.type === "workspace") break;
+    const isDbParent = parent.type === "database_id" || parent.type === "data_source_id";
+    const parentId = parent.page_id ?? parent.database_id ?? parent.block_id;
+    if (!parentId) break;
+    const parentTeam = teamForContainer(parentId);
+    if (parentTeam) return remember(parentTeam);
+
+    try {
+      if (isDbParent) node = await retrieveDatabase(parentId);
+      else if (parent.type === "block_id") node = await withRetry(() => notion.blocks.retrieve({ block_id: parentId }));
+      else node = await withRetry(() => notion.pages.retrieve({ page_id: parentId }));
+    } catch {
+      break;
+    }
+  }
+  return remember(null);
 }
 
 const ancestryCache = new Map(); // 정규화된 페이지 ID → 루트 하위 여부
