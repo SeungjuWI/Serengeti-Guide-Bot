@@ -26,7 +26,7 @@ const OFF_TOPIC_REPLY =
 
 /** 질문 → 분류·키워드 추출 → 노션 검색 → 답변 생성 */
 async function answerQuestion(question, history = "") {
-  const { relevant, keywords } = await analyzeQuestion(question, history);
+  const { relevant, keywords, personalInfo } = await analyzeQuestion(question, history);
 
   if (!relevant) {
     console.log(`질문: "${question}" / 사내 가이드와 무관 → 차단`);
@@ -42,7 +42,7 @@ async function answerQuestion(question, history = "") {
   if (!docs) docs = await searchNotionPages(keywords);
   console.log(`검색(${searchMode}) 문서 ${docs.length}건: ${docs.map((d) => d.title).join(", ") || "없음"}`);
 
-  const answer = await generateAnswer(question, docs, history);
+  const answer = await generateAnswer(question, docs, history, { personalInfo });
   await logEvent({
     type: "question",
     question,
