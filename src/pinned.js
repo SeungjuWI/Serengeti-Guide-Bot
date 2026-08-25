@@ -15,12 +15,33 @@ function normalizeId(id) {
 const BUILTIN_PINS = [
   {
     topic: "경조사",
-    patterns: [/경조/, /축의/, /조의/, /부의/, /화환/, /상조/, /부고/, /장례/, /조문/],
+    // 경조사 지원 제도 문서가 다루는 범위: 결혼·칠순(경사), 사망(조사), 경조금·휴가·화환·상조물품
+    // (출산은 모성보호제도 문서에서도 다루므로 여기에 넣지 않는다)
+    patterns: [
+      /경조/,
+      /축의/,
+      /조의/,
+      /부의금/,
+      /화환/,
+      /상조/,
+      /부고/,
+      /장례/,
+      /조문/,
+      /빈소/,
+      /상갓집/,
+      /돌아가/,
+      /사망/,
+      /별세/,
+      /상\s*을?\s*당/,
+      /결혼/,
+      /혼인/,
+      /칠순/,
+    ],
     pageIds: ["946b4edc8c344aef8193eb5e01a09ec6"], // 경조사 지원 제도
   },
 ];
 
-// PINNED_TOPICS 환경변수로 페이지를 덮어쓸 수 있다 (형식: "경조사:페이지ID,다른주제:페이지ID")
+// PINNED_TOPICS 환경변수로 고정 문서를 덮어쓸 수 있다 (형식: "경조사:페이지ID,다른주제:페이지ID")
 const PINS = BUILTIN_PINS.map((pin) => ({ ...pin, pageIds: pin.pageIds.map(normalizeId) }));
 for (const entry of (process.env.PINNED_TOPICS ?? "").split(",")) {
   const [topic, id] = entry.split(":").map((s) => s?.trim());

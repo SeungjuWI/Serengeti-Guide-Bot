@@ -1,9 +1,10 @@
 import "dotenv/config";
 import bolt from "@slack/bolt";
-import { searchNotionPages } from "./notion.js";
+import { searchNotionPages, fetchPageAsDoc } from "./notion.js";
 import { searchIndex, startIndexScheduler } from "./search.js";
 import { analyzeQuestion, generateAnswer } from "./llm.js";
 import { logEvent } from "./store.js";
+import { findPinnedTopic } from "./pinned.js";
 
 const { App } = bolt;
 
@@ -35,11 +36,21 @@ async function answerQuestion(question, history = "") {
   }
   console.log(`질문: "${question}" / 검색 키워드: ${keywords.join(", ")}`);
 
+  // 경조사처럼 지정 문서에서만 답해야 하는 주제는 검색 범위를 그 문서로 좁힌다
+  const pinned = findPinnedTopic(question, keywords);
+  if (pinned) console.log(`고정 주제 "${pinned.topic}" → 지정 문서에서만 검색`);
+
   // 의미 기반(임베딩) 검색을 우선 사용, 인덱스가 아직 없으면 키워드 검색으로 폴백
   const query = [...keywords, question].join("\n").slice(0, 1000);
-  let docs = await searchIndex(query, keywords);
+  let docs = await searchIndex(query, keywords, { pinnedPageIds: pinned?.pageIds ?? null });
   const searchMode = docs ? "임베딩" : "키워드";
-  if (!docs) docs = await searchNotionPages(keywords);
+  // 고정 주제는 키워드 검색으로 폴백하지 않는다 (지정 문서 밖이 섞여 들어오므로)
+  if (!docs) docs = pinned ? [] : await searchNotionPages(keywords);
+  // 고정 문서가 인덱스에 없거나 인덱스 자체가 없으면 노션에서 그 문서를 직접 읽어온다
+  if (pinned && docs.length === 0) {
+    const fetched = await Promise.all(pinned.pageIds.map((id) => fetchPageAsDoc(id)));
+    docs = fetched.filter(Boolean);
+  }
   console.log(`검색(${searchMode}) 문서 ${docs.length}건: ${docs.map((d) => d.title).join(", ") || "없음"}`);
 
   const answer = await generateAnswer(question, docs, history, { personalInfo });
