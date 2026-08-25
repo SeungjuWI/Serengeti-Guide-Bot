@@ -253,10 +253,10 @@ export async function searchIndex(query, keywords = [], { pinnedPageIds = null }
   const termSource = keywords.length > 0 ? keywords : query.split(/\s+/);
   const terms = [...new Set(termSource.map((t) => t.trim().toLowerCase()).filter((t) => t.length >= 2))];
   const scored = index.docs
-    // 제외 페이지는 인덱스에 남아 있어도 답변 근거로 쓰지 않음 (다음 인덱스 갱신 때 사라짐)
-    .filter((doc) => !isExcludedPage(doc.id))
-    // 주제가 특정 문서에 고정돼 있으면 그 문서 밖은 아예 후보에서 뺀다
-    .filter((doc) => !pinnedPageIds || isPinnedPage(pinnedPageIds, doc.id))
+    // 주제가 특정 문서에 고정돼 있으면 그 문서 밖은 아예 후보에서 뺀다.
+    // 고정은 명시적 지정이므로 제외 목록보다 우선한다 (인덱스 밖 폴백 경로와 동작을 맞춤).
+    // 고정이 없을 때만 제외 페이지를 거른다 — 인덱스에 남아 있어도 답변 근거로 쓰지 않음 (다음 갱신 때 사라짐)
+    .filter((doc) => (pinnedPageIds ? isPinnedPage(pinnedPageIds, doc.id) : !isExcludedPage(doc.id)))
     .map((doc) => {
       let score = similarity(queryVec, doc.embedding);
       // 검색어가 제목/본문에 실제로 등장하면 가점 (의미는 비슷한데 엉뚱한 문서가 이기는 것 방지)

@@ -43,13 +43,14 @@ async function answerQuestion(question, history = "") {
   // 의미 기반(임베딩) 검색을 우선 사용, 인덱스가 아직 없으면 키워드 검색으로 폴백
   const query = [...keywords, question].join("\n").slice(0, 1000);
   let docs = await searchIndex(query, keywords, { pinnedPageIds: pinned?.pageIds ?? null });
-  const searchMode = docs ? "임베딩" : "키워드";
+  let searchMode = docs ? "임베딩" : "키워드";
   // 고정 주제는 키워드 검색으로 폴백하지 않는다 (지정 문서 밖이 섞여 들어오므로)
   if (!docs) docs = pinned ? [] : await searchNotionPages(keywords);
   // 고정 문서가 인덱스에 없거나 인덱스 자체가 없으면 노션에서 그 문서를 직접 읽어온다
   if (pinned && docs.length === 0) {
     const fetched = await Promise.all(pinned.pageIds.map((id) => fetchPageAsDoc(id)));
     docs = fetched.filter(Boolean);
+    searchMode = "고정문서 직접 읽기";
   }
   console.log(`검색(${searchMode}) 문서 ${docs.length}건: ${docs.map((d) => d.title).join(", ") || "없음"}`);
 
