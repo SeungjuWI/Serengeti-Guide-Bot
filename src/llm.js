@@ -76,6 +76,9 @@ const SYSTEM_PROMPT = `너는 '세렝게티 가이드봇'이다. 사내 노션 �
 [답변 원칙]
 - 반드시 아래에 제공되는 노션 문서 내용만을 근거로 답한다. 문서에 없는 내용은 절대 지어내지 않는다.
 - 이전 대화가 주어지면 현재 질문을 그 맥락에서 해석해 이어지는 답변을 한다.
+- 문서의 지원 대상 표기를 임의로 넓히지 않는다. 특히 표에 "(본인)", "(본인, 배우자)" 같은 범위 표기가 있으면 그대로 지킨다.
+  "(본인)"이라고만 적힌 항목은 배우자 쪽 가족이 해당되지 않는다. 비슷한 항목에서 유추해 지원된다고 답하지 않는다.
+- "[규정 해석 기준]"이 함께 주어지면 그것을 문서 본문보다 우선해 따른다. 문서 표기가 애매할 때 회사가 확정한 해석이다.
 - 답변에 사용한 문서의 노션 링크를 답변 끝에 "📎 참고 문서" 항목으로 붙인다. 실제로 답변 근거로 삼은 문서만 적는다.
 - 참고 문서는 문서 제목과 URL을 함께 적는다(예: "📎 참고 문서: 점심 식대 지원 - https://..."). "문서 1", "문서 2" 같은 컨텍스트 번호는 제목 대신 쓰지 않으며, URL을 빠뜨리지 않는다.
 - "찾지 못했어요"라고 답하는 경우에는 "📎 참고 문서"를 붙이지 않는다. 근거가 없는데 링크만 붙이면 관련 없는 문서로 안내하는 셈이 된다.
@@ -117,9 +120,11 @@ const SYSTEM_PROMPT = `너는 '세렝게티 가이드봇'이다. 사내 노션 �
  * @param {string} question
  * @param {Array<{title: string, url: string, content: string, team?: string}>} docs
  * @param {string} history 이전 대화 내용 (없으면 빈 문자열)
- * @param {{personalInfo?: boolean}} options personalInfo=true면 문의 문안을 만들지 않는다
+ * @param {{personalInfo?: boolean, notes?: string[]}} options
+ *   personalInfo=true면 문의 문안을 만들지 않는다.
+ *   notes는 문서만으로는 모델이 자꾸 틀리는 지점을 못박는 해석 기준 (src/pinned.js).
  */
-export async function generateAnswer(question, docs, history = "", { personalInfo = false } = {}) {
+export async function generateAnswer(question, docs, history = "", { personalInfo = false, notes = [] } = {}) {
   const context =
     docs.length > 0
       ? docs
@@ -147,7 +152,9 @@ export async function generateAnswer(question, docs, history = "", { personalInf
         role: "user",
         content:
           (history ? `[이전 대화]\n${history}\n\n` : "") +
-          `[노션 검색 결과]\n${context}\n\n[질문]\n${question}` +
+          `[노션 검색 결과]\n${context}\n\n` +
+          (notes.length > 0 ? `[규정 해석 기준 — 문서 본문보다 우선]\n${notes.map((n) => `- ${n}`).join("\n")}\n\n` : "") +
+          `[질문]\n${question}` +
           (personalInfo ? `\n\n${PERSONAL_INFO_NOTICE}` : ""),
       },
     ],

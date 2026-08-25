@@ -54,7 +54,7 @@ async function answerQuestion(question, history = "") {
   }
   console.log(`검색(${searchMode}) 문서 ${docs.length}건: ${docs.map((d) => d.title).join(", ") || "없음"}`);
 
-  const answer = await generateAnswer(question, docs, history, { personalInfo });
+  const answer = await generateAnswer(question, docs, history, { personalInfo, notes: pinned?.notes ?? [] });
   await logEvent({
     type: "question",
     question,
