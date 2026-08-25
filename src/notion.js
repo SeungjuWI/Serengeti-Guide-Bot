@@ -732,3 +732,23 @@ export async function readPageContent(pageId, { followChildPages = true, maxChar
   const startPageDepth = followChildPages ? 0 : MAX_CHILD_PAGE_DEPTH;
   return getBlocksText(pageId, 0, { chars: maxChars }, startPageDepth);
 }
+
+/**
+ * 페이지 하나를 답변 근거 형태로 읽어옴 (제목·URL·본문·담당팀).
+ * 주제가 특정 문서에 고정돼 있는데 그 문서가 인덱스에 없을 때 쓰는 경로.
+ * @returns {Promise<{title: string, url: string, content: string, team: string|null} | null>}
+ */
+export async function fetchPageAsDoc(pageId) {
+  try {
+    const page = await withRetry(() => notion.pages.retrieve({ page_id: pageId }));
+    return {
+      title: getPageTitle(page),
+      url: page.url,
+      content: await getBlocksText(page.id),
+      team: await resolveTeamForPage(page),
+    };
+  } catch (err) {
+    console.error(`고정 문서 읽기 실패 (${pageId}):`, err.message);
+    return null;
+  }
+}
