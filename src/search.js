@@ -14,6 +14,10 @@ const MAX_CHUNKS_PER_PAGE = 2; // 페이지당 답변에 넣을 최대 청크 �
 const MIN_SCORE = 0.2; // 이보다 관련도가 낮은 청크는 버림
 const PINNED_MIN_SCORE = 0.05; // 주제가 특정 문서에 고정된 경우의 하한 (후보가 그 문서뿐이라 낮게)
 const PINNED_MAX_CHUNKS_PER_PAGE = 4; // 고정 문서는 규정 전체를 봐야 하므로 청크를 더 넣음
+// 1등 문서 점수 대비 이 비율에 못 미치는 문서는 버린다.
+// 절대 하한(MIN_SCORE)만 두면 1등이 압도적이어도 MAX_RESULTS 자리를 억지로 채우게 되어,
+// 무관한 문서가 답변 근거로 딸려 들어가고 모델이 그것까지 참고 문서로 인용한다.
+const RELATIVE_CUTOFF = 0.75;
 const EMBED_BATCH = 30; // 임베딩 API 한 번에 보낼 청크 수
 const READ_CONCURRENCY = 3; // 노션 본문 읽기 동시 실행 수 (API 요청 제한 고려)
 const MAX_INDEX_CHARS = 20000; // 인덱싱 시 페이지당 읽을 최대 글자 수
@@ -275,11 +279,19 @@ export async function searchIndex(query, keywords = [], { pinnedPageIds = null }
   // 고정 문서는 후보가 그 문서뿐이라 관련도 하한을 낮추고 청크를 더 넣는다 (규정 전체를 보게)
   const minScore = pinnedPageIds ? PINNED_MIN_SCORE : MIN_SCORE;
   const maxChunks = pinnedPageIds ? PINNED_MAX_CHUNKS_PER_PAGE : MAX_CHUNKS_PER_PAGE;
+  // 1등이 뚜렷하면 그 아래로 크게 처지는 문서는 버린다 (1등은 자기 자신 대비 1.0이라 항상 남는다).
+  // 고정 주제에는 적용하지 않는다 — 후보가 지정 문서뿐이라 청크를 넓게 봐야 하기 때문.
+  const topScore = scored[0]?.score ?? 0;
+  const floor = pinnedPageIds ? minScore : Math.max(minScore, topScore * RELATIVE_CUTOFF);
   const byPage = new Map();
   for (const { doc, score } of scored) {
     if (score < minScore) break;
     let entry = byPage.get(doc.id);
     if (!entry) {
+      // 상대 컷오프는 "새 페이지를 근거에 들일지"에만 적용한다.
+      // 이미 채택한 페이지의 나머지 청크까지 자르면 본문이 반토막 나서,
+      // 정작 답이 그 안에 있는데도 모델이 "찾지 못했어요"로 빠진다.
+      if (score < floor) continue;
       if (byPage.size >= MAX_RESULTS) continue;
       entry = { title: doc.title, url: doc.url, team: doc.team ?? null, score, chunks: [] }; // score = 그 페이지 최고 청크 점수
       byPage.set(doc.id, entry);

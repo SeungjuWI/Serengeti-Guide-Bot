@@ -60,7 +60,9 @@ async function answerQuestion(question, history = "") {
     question,
     outcome: docs.length > 0 ? "answered" : "no_docs",
     keywords,
-    docs: docs.map((d) => d.title),
+    // 컷오프 값을 감이 아니라 로그로 조정할 수 있도록 관련도 점수를 함께 남긴다
+    // (키워드 검색·고정문서 직접 읽기 경로는 점수가 없어 null)
+    docs: docs.map((d) => ({ title: d.title, score: d.score ?? null })),
   });
   return { text: answer, withFeedback: true, docTitles: docs.map((d) => d.title) };
 }
