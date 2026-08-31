@@ -625,7 +625,10 @@ export async function listAllPages({ log = () => {}, onError = () => {} } = {}) 
       enqueued.add(refKey);
       try {
         for (const row of await listDatabaseRows(ref.id)) {
-          queue.push({ id: row.id, page: row, team: refTeam, linkDepth: nextDepth });
+          // 다중 데이터소스 DB는 데이터소스마다 소관 팀이 다를 수 있다
+          // (재무회계 가이드 DB 안에 GA 데이터소스가 들어와 있는 경우 등). 행의 부모 데이터소스를 먼저 본다.
+          const rowTeam = teamForContainer(row.parent?.data_source_id) ?? refTeam;
+          queue.push({ id: row.id, page: row, team: rowTeam, linkDepth: nextDepth });
         }
       } catch (err) {
         log(`데이터베이스 읽기 실패 (${ref.id}): ${err.message}`);
@@ -668,7 +671,8 @@ export async function resolveTeamForPage(page) {
     const isDbParent = parent.type === "database_id" || parent.type === "data_source_id";
     const parentId = parent.page_id ?? parent.database_id ?? parent.block_id;
     if (!parentId) break;
-    const parentTeam = teamForContainer(parentId);
+    // DB 자체보다 데이터소스의 소관이 우선한다 (한 DB에 팀이 다른 데이터소스가 섞여 있을 수 있음)
+    const parentTeam = teamForContainer(parent.data_source_id) ?? teamForContainer(parentId);
     if (parentTeam) return remember(parentTeam);
 
     try {
