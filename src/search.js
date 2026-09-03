@@ -23,8 +23,34 @@ const READ_CONCURRENCY = 3; // 노션 본문 읽기 동시 실행 수 (API 요�
 const MAX_INDEX_CHARS = 20000; // 인덱싱 시 페이지당 읽을 최대 글자 수
 const CHUNK_CHARS = 1400; // 청크 하나의 최대 길이
 const STANDALONE_SECTION_CHARS = 400; // 이 이상인 섹션은 독립 청크로 (다른 섹션과 안 섞음)
-const TERM_BOOST = 0.15; // 검색어가 본문에 실제 등장할 때 최대 가점
+const TERM_BOOST = 0.35; // 검색어가 본문에 실제 등장할 때 최대 가점 (드문 단어일수록 이 값에 가깝게)
 const THIN_CONTENT_PENALTY = 0.05; // 내용이 거의 없는 페이지 감점 (제목만으로 상위 독식 방지)
+
+/**
+ * 검색어를 단어로 쪼개고 각 단어에 희소성(IDF) 가중치를 매긴다.
+ * 한국어 임베딩은 표기가 비슷한 말을 잘 헷갈려서("연차" 질문에 "주차 신청" 문서가 1등),
+ * 본문에 그 단어가 실제로 있는지가 중요한 신호다. 다만 단어를 똑같이 취급하면
+ * "연차 신청"의 "신청"처럼 아무 문서에나 있는 말에 끌려가므로, 드문 단어에 무게를 몰아준다.
+ * 가중치를 IDF의 제곱으로 두는 건 "연차"(드묾)와 "신청"(흔함)의 차이를 충분히 벌리기 위함.
+ * @returns {Map<string, number>} 단어 → 가중치
+ */
+function lexicalWeights(docs, terms) {
+  const words = [
+    ...new Set(
+      terms
+        .flatMap((t) => t.split(/\s+/))
+        .map((w) => w.trim().toLowerCase())
+        .filter((w) => w.length >= 2)
+    ),
+  ];
+  if (words.length === 0) return new Map();
+  const df = new Map(words.map((w) => [w, 0]));
+  for (const doc of docs) {
+    const haystack = `${doc.title}\n${doc.content}`.toLowerCase();
+    for (const w of words) if (haystack.includes(w)) df.set(w, df.get(w) + 1);
+  }
+  return new Map(words.map((w) => [w, Math.log((docs.length + 1) / (df.get(w) + 1)) ** 2]));
+}
 
 /** OpenAI 임베딩은 길이가 1로 정규화되어 있어 내적이 곧 코사인 유사도 */
 function similarity(a, b) {
@@ -256,18 +282,23 @@ export async function searchIndex(query, keywords = [], { pinnedPageIds = null }
   const [queryVec] = await embedTexts([query]);
   const termSource = keywords.length > 0 ? keywords : query.split(/\s+/);
   const terms = [...new Set(termSource.map((t) => t.trim().toLowerCase()).filter((t) => t.length >= 2))];
-  const scored = index.docs
-    // 주제가 특정 문서에 고정돼 있으면 그 문서 밖은 아예 후보에서 뺀다.
-    // 고정은 명시적 지정이므로 제외 목록보다 우선한다 (인덱스 밖 폴백 경로와 동작을 맞춤).
-    // 고정이 없을 때만 제외 페이지를 거른다 — 인덱스에 남아 있어도 답변 근거로 쓰지 않음 (다음 갱신 때 사라짐)
-    .filter((doc) => (pinnedPageIds ? isPinnedPage(pinnedPageIds, doc.id) : !isExcludedPage(doc.id)))
+  // 주제가 특정 문서에 고정돼 있으면 그 문서 밖은 아예 후보에서 뺀다.
+  // 고정은 명시적 지정이므로 제외 목록보다 우선한다 (인덱스 밖 폴백 경로와 동작을 맞춤).
+  // 고정이 없을 때만 제외 페이지를 거른다 — 인덱스에 남아 있어도 답변 근거로 쓰지 않음 (다음 갱신 때 사라짐)
+  const candidates = index.docs.filter((doc) =>
+    pinnedPageIds ? isPinnedPage(pinnedPageIds, doc.id) : !isExcludedPage(doc.id)
+  );
+  const weights = lexicalWeights(candidates, terms);
+  const totalWeight = [...weights.values()].reduce((sum, w) => sum + w, 0);
+  const scored = candidates
     .map((doc) => {
       let score = similarity(queryVec, doc.embedding);
       // 검색어가 제목/본문에 실제로 등장하면 가점 (의미는 비슷한데 엉뚱한 문서가 이기는 것 방지)
-      if (terms.length > 0) {
+      if (totalWeight > 0) {
         const haystack = `${doc.title}\n${doc.content}`.toLowerCase();
-        const hits = terms.filter((t) => haystack.includes(t)).length;
-        score += TERM_BOOST * (hits / terms.length);
+        let hit = 0;
+        for (const [w, weight] of weights) if (haystack.includes(w)) hit += weight;
+        score += TERM_BOOST * (hit / totalWeight);
       }
       // 내용이 거의 없는 페이지는 감점 (제목만 비슷한 빈 페이지가 상위 독식하는 것 방지)
       if (doc.content.length < 80) score -= THIN_CONTENT_PENALTY;

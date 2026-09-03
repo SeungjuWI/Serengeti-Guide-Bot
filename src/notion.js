@@ -52,6 +52,10 @@ const EXCLUDED_DATABASE_IDS = new Set(
   [
     "5a0e0fc452ed4833ac31bb2a9b76da65", // 동대문 강의장(사바나) 이용현황 — 예약 기록 612행
     "2ddbe2a69ead4c6981535c3260aaf841", // 16F 스튜디오 장비 예약 — 대여 기록 341행
+    // 활동 후기 DB — 제도가 아니라 조별 활동 기록이라 답변 근거가 못 되면서,
+    // 인덱스 청크의 40% 이상을 차지해 사내에 없는 용어("크런치 타임")에도 상위로 잡혀 지어낸 답을 만든다.
+    "21444860a4f480ce979efbd6c46c66aa", // A!L INSIGHT TIME 활동 공유 — 조별 활동 내용 26행
+    "25b415630ad24d8397178566f152dd1c", // 라온's 활동 리뷰 — 동호회 활동 후기 47행
     ...(process.env.NOTION_EXCLUDED_DATABASE_IDS ?? "").split(","),
   ]
     .map(normalizePageId)
